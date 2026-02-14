@@ -3,7 +3,8 @@ export type AasRole = (typeof VALID_ROLES)[number];
 
 export function validateRole(raw: string | undefined): AasRole {
   if (!raw) {
-    throw new Error("AAS_ROLE environment variable is required. Set to 'control-plane' or 'worker'.");
+    console.warn("Warning: AAS_ROLE not set, defaulting to 'control-plane'");
+    return "control-plane";
   }
 
   if (!VALID_ROLES.includes(raw as AasRole)) {

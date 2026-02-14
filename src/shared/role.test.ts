@@ -10,12 +10,12 @@ describe("validateRole", () => {
     expect(validateRole("worker")).toBe("worker");
   });
 
-  it("throws on undefined (missing AAS_ROLE)", () => {
-    expect(() => validateRole(undefined)).toThrow("AAS_ROLE environment variable is required");
+  it("defaults to 'control-plane' when undefined", () => {
+    expect(validateRole(undefined)).toBe("control-plane");
   });
 
-  it("throws on empty string", () => {
-    expect(() => validateRole("")).toThrow("AAS_ROLE environment variable is required");
+  it("defaults to 'control-plane' when empty string", () => {
+    expect(validateRole("")).toBe("control-plane");
   });
 
   it("throws on invalid value", () => {
