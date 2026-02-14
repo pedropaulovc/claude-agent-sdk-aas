@@ -18,7 +18,7 @@ export const sentryMiddleware = createMiddleware(async (c, next) => {
   });
 });
 
-export function jsonResponse<T extends Record<string, unknown>>(
+export function jsonResponse<T extends Record<string, unknown> | Record<string, unknown>[]>(
   c: Context,
   data: T,
   status: 200 | 201 | 400 | 404 | 409 | 429 | 500 = 200,

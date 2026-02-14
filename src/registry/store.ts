@@ -91,6 +91,10 @@ export class InstanceStore {
     return deleted;
   }
 
+  clear(): void {
+    this.instances.clear();
+  }
+
   nukeByPrefix(prefix: string): number {
     const toDelete = Array.from(this.instances.keys()).filter(
       (name) => name === prefix || name.startsWith(`${prefix}/`),
