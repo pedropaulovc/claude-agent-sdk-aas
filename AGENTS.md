@@ -47,6 +47,7 @@ src/
 ├── server.ts             # Hono app + route wiring
 ├── routes/               # API route handlers (health, instances)
 ├── registry/             # Instance store + types (AgentInstance, Zod schemas)
+├── sdk/                  # SDK executor, event mapping, OTEL env
 └── telemetry/            # Sentry init, helpers, middleware
 ```
 
