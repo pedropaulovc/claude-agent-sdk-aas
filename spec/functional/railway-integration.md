@@ -8,11 +8,13 @@ Located at `src/railway/client.ts`. Wraps Railway's GraphQL API with typed metho
 
 ### Configuration
 
-| Env Var | Description |
-|---------|-------------|
-| `RAILWAY_API_TOKEN` | API token with project access |
-| `RAILWAY_PROJECT_ID` | Target project ID |
-| `RAILWAY_ENVIRONMENT_ID` | Target environment ID |
+| Env Var | Description | Source |
+|---------|-------------|--------|
+| `RAILWAY_API_TOKEN` | API token with project access | Set manually via `railway variables` |
+| `RAILWAY_PROJECT_ID` | Target project ID | Auto-injected by Railway at runtime |
+| `RAILWAY_ENVIRONMENT_ID` | Target environment ID | Auto-injected by Railway at runtime |
+
+> **Note**: `RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are [automatically provided by Railway](https://docs.railway.com/reference/variables) to all deployments. Only `RAILWAY_API_TOKEN` needs to be set explicitly. This means PR preview environments automatically get the correct IDs — no per-branch config needed.
 
 ### API Methods
 

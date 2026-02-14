@@ -71,7 +71,7 @@ Create `src/railway/client.ts` with methods for service CRUD, environment variab
 - [ ] `serviceDomainCreate(serviceId)` → creates an internal domain, returns URL
 - [ ] All methods wrapped in Sentry spans with `railway_api.*` metrics
 - [ ] Graceful error handling: Railway API errors are caught and re-thrown with context
-- [ ] Env vars validated on init: `RAILWAY_API_TOKEN`, `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`
+- [ ] Env var validated on init: `RAILWAY_API_TOKEN` (required, set manually). `RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are auto-injected by Railway at runtime
 
 ---
 
