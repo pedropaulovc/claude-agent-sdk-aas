@@ -22,7 +22,7 @@ Vercel App ──HTTP──▶ AAS Container (Railway, Hono + Node.js)
 | **Validation** | Zod | `zod` | Input validation at API boundaries |
 | **Language** | TypeScript | `typescript` | Everything |
 | **Runtime** | Node.js 22+ | — | Long-lived container process |
-| **Deployment** | Railway | `@railway/cli` | Container hosting with CLI deploy |
+| **Deployment** | Railway + Railpack | `@railway/cli` | Container hosting with zero-config builds |
 
 ## API Surface
 

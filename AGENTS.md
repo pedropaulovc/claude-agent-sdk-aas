@@ -21,15 +21,16 @@ Long-lived container service managing named Claude Agent SDK instances. Runs as 
 
 ## Deployment
 
-Deployed to [Railway](https://railway.app) as a long-lived container. Railway auto-detects the Dockerfile and builds from it.
+Deployed to [Railway](https://railway.app) as a long-lived container. Railway uses Railpack (its zero-config builder) to auto-detect the Node.js/TypeScript app from `package.json` and build an optimized container image. No Dockerfile needed.
 
+- **Build**: Railpack detects `package.json`, runs `npm ci` + the `build` script (`tsc`), and uses the `start` script (`node dist/index.js`) as the entry point.
 - **CLI**: `npx @railway/cli@latest` (or install globally). Key commands:
   - `railway link` — Link local project to Railway service (one-time setup)
   - `railway up -d` — Deploy (detached, returns immediately)
   - `railway logs` — Tail production logs
   - `railway variables` — Manage env vars on Railway
 - **Environment variables**: Set `ANTHROPIC_API_KEY`, `SENTRY_DSN` via `railway variables` or the Railway dashboard. Railway injects `PORT` automatically.
-- **Dockerfile**: Multi-stage build (`npm ci` → `tsc` → `node dist/index.js`). Railway uses this automatically.
+- **PR previews**: Railway auto-deploys a preview environment per GitHub PR. Railpack builds from the PR branch automatically.
 
 ## Architecture
 

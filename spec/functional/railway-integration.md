@@ -13,7 +13,6 @@ Located at `src/railway/client.ts`. Wraps Railway's GraphQL API with typed metho
 | `RAILWAY_API_TOKEN` | API token with project access |
 | `RAILWAY_PROJECT_ID` | Target project ID |
 | `RAILWAY_ENVIRONMENT_ID` | Target environment ID |
-| `RAILWAY_WORKER_IMAGE` | Docker image reference for worker containers |
 
 ### API Methods
 
@@ -129,19 +128,22 @@ When nuking and immediately re-provisioning, the Railway service may not yet be 
 2. On name conflict error, retry after a 2s delay (max 3 retries)
 3. If retries exhausted, fail with a descriptive error
 
-## Docker Image Strategy
+## Build Strategy
 
-A single Docker image serves both roles:
+Railway uses Railpack (zero-config builder) to auto-detect the Node.js/TypeScript app from `package.json`. No Dockerfile needed. Railpack runs `npm ci`, the `build` script (`tsc`), and uses the `start` script as the entry point.
 
-```dockerfile
-# Same Dockerfile, entry.ts reads AAS_ROLE
-CMD ["node", "dist/entry.js"]
-```
+A single codebase serves both roles — `entry.ts` reads `AAS_ROLE` to dispatch:
 
 - `AAS_ROLE=control-plane` → boots the control plane server
 - `AAS_ROLE=worker` → boots the worker server
 
-The control plane sets `RAILWAY_WORKER_IMAGE` to point to the same image (or a specific version tag). When creating a worker service, this image reference is used.
+The `start` script in `package.json` must point to the compiled entry point:
+
+```json
+"start": "node dist/entry.js"
+```
+
+When creating a worker service, the control plane sets `AAS_ROLE=worker` in the service's environment variables. Railway builds the same codebase from the repo and Railpack produces the container image automatically.
 
 ## Service Deletion
 

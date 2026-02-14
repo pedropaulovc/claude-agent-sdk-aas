@@ -1,6 +1,6 @@
 # Milestone 4: Container-Per-Instance Architecture
 
-**Goal**: Replace in-process SDK execution with one Docker container per instance. The current AAS becomes a control plane that provisions and manages worker containers via Railway's API.
+**Goal**: Replace in-process SDK execution with one container per instance (built by Railpack). The current AAS becomes a control plane that provisions and manages worker containers via Railway's API.
 
 **Dependency**: M3 (Management UI) must be complete before starting M4.
 
@@ -23,7 +23,7 @@ graph TD
 
 ## [S-4.0] Shared Types & Entry Point
 
-As a developer, I want a dual-role entry point so a single Docker image can boot as either control plane or worker.
+As a developer, I want a dual-role entry point so a single codebase can boot as either control plane or worker.
 
 ### Description
 
@@ -77,7 +77,7 @@ Create `src/railway/client.ts` with methods for service CRUD, environment variab
 
 ## [S-4.2] Worker Scaffold
 
-As a developer, I want a worker Hono server with a health endpoint so Railway can detect when the container is ready.
+As a developer, I want a worker Hono server with a health endpoint so Railway can detect when the worker is ready.
 
 ### Description
 
