@@ -25,16 +25,17 @@ describe("Instance API Routes", () => {
 
   // --- POST /v1/instances ---
 
-  it("POST /v1/instances — provision with valid body returns 201", async () => {
+  it("POST /v1/instances — provision returns 202 with provisioning status", async () => {
     const res = await provision("test/agent");
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(202);
 
     const body = await res.json();
     expect(body.name).toBe("test/agent");
     expect(body.systemPrompt).toBe("You are a test agent.");
-    expect(body.status).toBe("ready");
-    expect(body.sessionId).toBeNull();
-    expect(body.invocationCount).toBe(0);
+    expect(body.status).toBe("provisioning");
+    expect(body.railwayServiceId).toBeNull();
+    expect(body.workerUrl).toBeNull();
+    expect(body.provisionError).toBeNull();
     expect(body.model).toBe("claude-haiku-4-5-20251001");
   });
 
@@ -59,7 +60,7 @@ describe("Instance API Routes", () => {
     expect(body.error).toBeDefined();
   });
 
-  it("POST /v1/instances — provision with invalid name (leading slash) returns 400", async () => {
+  it("POST /v1/instances — provision with invalid name returns 400", async () => {
     const res = await app.request("/v1/instances", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -120,8 +121,11 @@ describe("Instance API Routes", () => {
 
   // --- PATCH /v1/instances/* ---
 
-  it("PATCH /v1/instances/test/agent — update existing returns 200 with updated fields", async () => {
+  it("PATCH /v1/instances/test/agent — update returns 200 with deploying status", async () => {
     await provision("test/agent");
+    const instance = store.get("test/agent");
+    if (!instance) throw new Error("expected instance");
+    instance.status = "ready";
 
     const res = await app.request("/v1/instances/test/agent", {
       method: "PATCH",
@@ -132,26 +136,18 @@ describe("Instance API Routes", () => {
 
     const body = await res.json();
     expect(body.model).toBe("claude-sonnet-4-20250514");
-    expect(body.name).toBe("test/agent");
+    expect(body.status).toBe("deploying");
   });
 
-  it("PATCH /v1/instances/test/agent — update resets sessionId", async () => {
+  it("PATCH /v1/instances/test/agent — update during provisioning returns 409", async () => {
     await provision("test/agent");
-
-    // Manually set a sessionId to simulate an active session
-    const instance = store.get("test/agent");
-    if (!instance) throw new Error("expected instance");
-    instance.sessionId = "session-abc";
 
     const res = await app.request("/v1/instances/test/agent", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ maxTurns: 100 }),
     });
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.sessionId).toBeNull();
+    expect(res.status).toBe(409);
   });
 
   it("PATCH /v1/instances/missing — update non-existing returns 404", async () => {
@@ -168,7 +164,7 @@ describe("Instance API Routes", () => {
 
   // --- DELETE /v1/instances/* ---
 
-  it("DELETE /v1/instances/test/agent — delete existing returns 200 with deleted count", async () => {
+  it("DELETE /v1/instances/test/agent — delete existing returns deleted count", async () => {
     await provision("test/agent");
 
     const res = await app.request("/v1/instances/test/agent", {
@@ -180,7 +176,7 @@ describe("Instance API Routes", () => {
     expect(body.deleted).toBe(1);
   });
 
-  it("DELETE /v1/instances/test — nuke prefix returns 200 with total deleted count", async () => {
+  it("DELETE /v1/instances/test — nuke prefix returns total deleted count", async () => {
     await provision("test/agent1");
     await provision("test/agent2");
     await provision("test/agent3");
@@ -194,11 +190,10 @@ describe("Instance API Routes", () => {
     const body = await res.json();
     expect(body.deleted).toBe(3);
 
-    // Verify "other/agent" is untouched
     expect(store.get("other/agent")).not.toBeNull();
   });
 
-  it("DELETE /v1/instances/missing — delete non-existing returns 200 with deleted 0", async () => {
+  it("DELETE /v1/instances/missing — delete non-existing returns deleted 0", async () => {
     const res = await app.request("/v1/instances/missing", {
       method: "DELETE",
     });

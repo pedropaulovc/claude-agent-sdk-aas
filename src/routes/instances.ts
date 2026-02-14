@@ -6,7 +6,7 @@ import { logInfo, withSpan } from "../telemetry/helpers.js";
 
 export const instanceRoutes = new Hono();
 
-// POST /v1/instances — Provision
+// POST /v1/instances — Provision (async, returns 202)
 instanceRoutes.post("/v1/instances", async (c) => {
   return withSpan("api.provision", "http.handler", async () => {
     const parsed = provisionSchema.safeParse(await c.req.json());
@@ -17,7 +17,7 @@ instanceRoutes.post("/v1/instances", async (c) => {
     try {
       const instance = await store.provision(parsed.data);
       logInfo("api.provision | success", { name: instance.name });
-      return jsonResponse(c, instance as unknown as Record<string, unknown>, 201);
+      return jsonResponse(c, instance as unknown as Record<string, unknown>, 202);
     } catch (err) {
       if (err instanceof StoreError && err.code === "conflict") {
         return jsonResponse(c, { error: err.message }, 409);
@@ -32,7 +32,7 @@ instanceRoutes.get("/v1/instances", (c) => {
   const prefix = c.req.query("prefix");
   const instances = store.list(prefix);
   logInfo("api.list", { prefix: prefix ?? "all", count: instances.length });
-  return jsonResponse(c, instances as unknown as Record<string, unknown>, 200);
+  return jsonResponse(c, instances as unknown as Record<string, unknown>[], 200);
 });
 
 // GET /v1/instances/* — Get by name
@@ -70,12 +70,10 @@ instanceRoutes.patch("/v1/instances/*", async (c) => {
   });
 });
 
-// DELETE /v1/instances/* — Delete/Nuke
+// DELETE /v1/instances/* — Delete exact or nuke by prefix
 instanceRoutes.delete("/v1/instances/*", (c) => {
   const name = c.req.param("*") ?? c.req.path.replace("/v1/instances/", "");
-  const exact = store.delete(name);
-  const prefixed = store.nukeByPrefix(name);
-  const deleted = exact + prefixed;
+  const deleted = store.nukeByPrefix(name);
   logInfo("api.delete", { name, deleted });
   return jsonResponse(c, { deleted }, 200);
 });
