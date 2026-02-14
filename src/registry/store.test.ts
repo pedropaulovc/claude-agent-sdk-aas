@@ -42,7 +42,7 @@ describe("InstanceStore", () => {
 
   // --- provision ---
 
-  it("provision creates instance with correct defaults", async () => {
+  it("provision creates instance with correct fields", async () => {
     const instance = await store.provision(makeRequest({ name: "michael" }));
 
     expect(instance.name).toBe("michael");
@@ -51,13 +51,11 @@ describe("InstanceStore", () => {
     expect(instance.model).toBe("claude-haiku-4-5-20251001");
     expect(instance.maxTurns).toBe(50);
     expect(instance.maxBudgetUsd).toBe(1.0);
-    expect(instance.sessionId).toBeNull();
-    expect(instance.status).toBe("ready");
+    expect(instance.status).toBe("provisioning");
+    expect(instance.railwayServiceId).toBeNull();
+    expect(instance.workerUrl).toBeNull();
+    expect(instance.provisionError).toBeNull();
     expect(instance.createdAt).toBeInstanceOf(Date);
-    expect(instance.lastInvokedAt).toBeNull();
-    expect(instance.invocationCount).toBe(0);
-    expect(instance.activeInvocationId).toBeNull();
-    expect(instance.queueDepth).toBe(0);
   });
 
   it("provision increments store size", async () => {
@@ -132,32 +130,46 @@ describe("InstanceStore", () => {
 
   it("update modifies only provided fields", async () => {
     await store.provision(makeRequest({ name: "u1", model: "old-model", maxTurns: 10 }));
+    const instance = store.get("u1");
+    if (!instance) throw new Error("expected instance");
+    instance.status = "ready";
 
     const updated = await store.update("u1", { model: "new-model" });
     expect(updated.model).toBe("new-model");
-    expect(updated.maxTurns).toBe(10); // unchanged
-    expect(updated.systemPrompt).toBe("You are a test agent."); // unchanged
+    expect(updated.maxTurns).toBe(10);
+    expect(updated.systemPrompt).toBe("You are a test agent.");
   });
 
-  it("update resets sessionId", async () => {
+  it("update transitions status to deploying", async () => {
     await store.provision(makeRequest({ name: "u2" }));
-    // Manually set sessionId to simulate a session
     const instance = store.get("u2");
     if (!instance) throw new Error("expected instance");
-    instance.sessionId = "session-123";
+    instance.status = "ready";
 
     const updated = await store.update("u2", { model: "new-model" });
-    expect(updated.sessionId).toBeNull();
+    expect(updated.status).toBe("deploying");
   });
 
-  it("update rejects while status is running with conflict error", async () => {
-    await store.provision(makeRequest({ name: "running-inst" }));
-    const instance = store.get("running-inst");
-    if (!instance) throw new Error("expected instance");
-    instance.status = "running";
+  it("update rejects while status is provisioning with conflict error", async () => {
+    await store.provision(makeRequest({ name: "prov-inst" }));
 
     try {
-      await store.update("running-inst", { model: "new-model" });
+      await store.update("prov-inst", { model: "new-model" });
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(StoreError);
+      expect((err as StoreError).code).toBe("conflict");
+    }
+  });
+
+  it("update rejects while status is destroying with conflict error", async () => {
+    await store.provision(makeRequest({ name: "dest-inst" }));
+    const instance = store.get("dest-inst");
+    if (!instance) throw new Error("expected instance");
+    instance.status = "destroying";
+
+    try {
+      await store.update("dest-inst", { model: "new-model" });
       expect.fail("should have thrown");
     } catch (err) {
       expect(err).toBeInstanceOf(StoreError);

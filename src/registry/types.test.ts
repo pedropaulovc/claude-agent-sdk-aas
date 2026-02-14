@@ -110,14 +110,13 @@ describe("registry types", () => {
     expect(result.mcpServers[0]).toHaveProperty("url");
   });
 
-  it("accepts stdio MCP server config", () => {
-    const result = provisionSchema.parse({
+  it("rejects stdio MCP server config", () => {
+    const result = provisionSchema.safeParse({
       name: "test",
       systemPrompt: "You are a helper.",
       mcpServers: [{ name: "local", command: "npx", args: ["-y", "mcp-server"] }],
     });
-    expect(result.mcpServers).toHaveLength(1);
-    expect(result.mcpServers[0]).toHaveProperty("command");
+    expect(result.success).toBe(false);
   });
 
   it("overrides defaults when values are provided", () => {

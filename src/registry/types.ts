@@ -1,20 +1,11 @@
 import { z } from "zod";
 
-// MCP Server Config - two variants
-const remoteMcpServerSchema = z.object({
+// MCP Server Config - remote only (no stdio in containers)
+export const mcpServerSchema = z.object({
   name: z.string().min(1, "name is required"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
 });
-
-const stdioMcpServerSchema = z.object({
-  name: z.string().min(1, "name is required"),
-  command: z.string().min(1, "command is required"),
-  args: z.array(z.string()).optional(),
-  env: z.record(z.string(), z.string()).optional(),
-});
-
-export const mcpServerSchema = z.union([remoteMcpServerSchema, stdioMcpServerSchema]);
 export type McpServerConfig = z.infer<typeof mcpServerSchema>;
 
 // Instance name validation
@@ -43,21 +34,19 @@ export const updateSchema = z.object({
 export type UpdateRequest = z.infer<typeof updateSchema>;
 
 // Instance status
-export type InstanceStatus = "ready" | "running" | "error";
+export type InstanceStatus = "provisioning" | "deploying" | "ready" | "unreachable" | "error" | "destroying";
 
-// Agent Instance type
-export type AgentInstance = {
+// Instance record
+export type InstanceRecord = {
   name: string;
   systemPrompt: string;
   mcpServers: McpServerConfig[];
   model: string;
   maxTurns: number;
   maxBudgetUsd: number;
-  sessionId: string | null;
   status: InstanceStatus;
+  railwayServiceId: string | null;
+  workerUrl: string | null;
+  provisionError: string | null;
   createdAt: Date;
-  lastInvokedAt: Date | null;
-  invocationCount: number;
-  activeInvocationId: string | null;
-  queueDepth: number;
 };
