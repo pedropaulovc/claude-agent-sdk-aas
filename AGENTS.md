@@ -23,7 +23,8 @@ Long-lived container service managing named Claude Agent SDK instances. Runs as 
 
 Deployed to [Railway](https://railway.app) as a long-lived container. Railway uses Railpack (its zero-config builder) to auto-detect the Node.js/TypeScript app from `package.json` and build an optimized container image. No Dockerfile needed.
 
-- **Build**: Railpack detects `package.json`, runs `npm ci` + the `build` script (`tsc`), and uses the `start` script (`node dist/index.js`) as the entry point.
+- **Build**: Railpack detects `package.json`, runs `npm ci` + the `build` script (`tsc`), and uses the `start` script (`node dist/entry.js`) as the entry point.
+- **Dual-role**: A single codebase serves both control plane and worker. `AAS_ROLE` env var selects the role at boot.
 - **CLI**: `npx @railway/cli@latest` (or install globally). Key commands:
   - `railway link` — Link local project to Railway service (one-time setup)
   - `railway up -d` — Deploy (detached, returns immediately)
@@ -44,10 +45,11 @@ Deployed to [Railway](https://railway.app) as a long-lived container. Railway us
 
 ```text
 src/
-├── index.ts              # Entry: init Sentry, start server
-├── server.ts             # Hono app + route wiring
+├── entry.ts              # Dual-role entry: reads AAS_ROLE, boots control-plane or worker
+├── server.ts             # Control plane Hono app + route wiring
 ├── routes/               # API route handlers (health, instances)
-├── registry/             # Instance store + types (InstanceRecord, Zod schemas)
+├── registry/             # Instance store (InstanceStore class)
+├── shared/               # Shared types (InstanceRecord, McpServerConfig, Zod schemas)
 └── telemetry/            # Sentry init, helpers, middleware
 ```
 
@@ -68,7 +70,7 @@ src/
 - All routes use Zod for input validation.
 - All routes return JSON (except SSE endpoints and `/ui`).
 - All routes emit Sentry telemetry via middleware.
-- Use `jsonResponse()` helper that attaches trace headers (`streamResponse()` will be added in S-2.1).
+- Use `jsonResponse()` / `streamResponse()` helpers that attach trace headers.
 - Error responses follow the shape: `{ error: string, code?: string }`.
 
 ### Error Handling
@@ -83,10 +85,14 @@ src/
 All secrets live in `.env.local` (gitignored). If the file is missing, copy from `../the-office-a/.env.local`.
 
 ```
+AAS_ROLE=control-plane          # Required: 'control-plane' or 'worker'
 ANTHROPIC_API_KEY=sk-ant-...    # Required
 SENTRY_DSN=https://...          # Required
+RAILWAY_API_TOKEN=...           # Required (for Railway API calls, control-plane only)
 PORT=8080                       # Optional, default 8080
 ```
+
+`RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are auto-injected by Railway at runtime.
 
 ## Key Specs
 
@@ -113,7 +119,7 @@ Telemetry is VITAL. **Be liberal — when in doubt, add a span, log, or metric.*
 
 ### Traced Responses
 
-All API routes MUST use `jsonResponse()` helper instead of raw Hono responses (`streamResponse()` will be added in S-2.1 for SSE endpoints). These helpers automatically attach the active Sentry trace ID as an `x-sentry-trace-id` response header, linking every HTTP response to its full trace in Sentry.
+All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of raw Hono responses. These helpers automatically attach the active Sentry trace ID as an `x-sentry-trace-id` response header, linking every HTTP response to its full trace in Sentry.
 
 ## Testing
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { InstanceStore, StoreError } from "./store.js";
-import type { ProvisionRequest } from "./types.js";
+import type { ProvisionRequest } from "../shared/types.js";
 
 vi.mock("@sentry/node", async () => {
   const actual = await vi.importActual<typeof import("@sentry/node")>("@sentry/node");

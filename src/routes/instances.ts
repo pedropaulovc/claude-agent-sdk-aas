@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { store, StoreError } from "../registry/store.js";
-import { provisionSchema, updateSchema } from "../registry/types.js";
+import { provisionSchema, updateSchema } from "../shared/types.js";
 import { jsonResponse } from "../telemetry/middleware.js";
 import { logInfo, withSpan } from "../telemetry/helpers.js";
 
