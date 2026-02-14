@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "AAS_ROLE=control-plane tsx watch src/entry.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/entry.js",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

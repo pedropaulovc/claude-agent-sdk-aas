@@ -1,5 +1,5 @@
 import { logInfo, countMetric, withSpan } from "../telemetry/helpers.js";
-import type { InstanceRecord, ProvisionRequest, UpdateRequest } from "./types.js";
+import type { InstanceRecord, ProvisionRequest, UpdateRequest } from "../shared/types.js";
 
 export class StoreError extends Error {
   constructor(
