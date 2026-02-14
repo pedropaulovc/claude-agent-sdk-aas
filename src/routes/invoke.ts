@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { store } from "../registry/store.js";
 import { executeInvocation } from "../sdk/executor.js";
+import { instanceQueue, QueueFullError } from "../queue/instance-queue.js";
 import { jsonResponse } from "../telemetry/middleware.js";
-import { logInfo, logError, withSpan } from "../telemetry/helpers.js";
+import { logInfo, logError, withSpan, countMetric } from "../telemetry/helpers.js";
 import type { InvocationEvent } from "../sdk/events.js";
 
 const invokeBodySchema = z.object({
@@ -17,6 +18,15 @@ const invokeBodySchema = z.object({
 });
 
 export const invokeRoutes = new Hono();
+
+/** After an invocation finishes, dequeue the next waiting one and resolve its promise */
+function drainNext(instanceName: string): void {
+  const next = instanceQueue.dequeue(instanceName);
+  if (!next) return;
+
+  logInfo(`${instanceName} | queue.drain_next`, { remaining: instanceQueue.depth(instanceName) });
+  next.resolve();
+}
 
 invokeRoutes.post("/v1/instances/*", async (c, next) => {
   // Only handle paths ending with /invoke — fall through otherwise
@@ -42,18 +52,46 @@ invokeRoutes.post("/v1/instances/*", async (c, next) => {
   }
 
   const abortController = new AbortController();
+  const needsQueue = instance.status === "running";
 
-  logInfo(`api.invoke | start`, { instanceName: name, prompt: parsed.data.prompt.substring(0, 200) });
+  // If instance is busy, try to enqueue. Reject with 429 if full.
+  let queuePromise: Promise<void> | null = null;
+  if (needsQueue) {
+    try {
+      queuePromise = instanceQueue.enqueue(name, parsed.data.prompt, abortController);
+      instance.queueDepth = instanceQueue.depth(name);
+    } catch (err) {
+      if (err instanceof QueueFullError) {
+        countMetric("queue.rejected", 1, { instance: name });
+        return jsonResponse(c, { error: err.message, code: "queue_full" }, 429);
+      }
+      throw err;
+    }
+  }
+
+  logInfo(`api.invoke | start`, {
+    instanceName: name,
+    prompt: parsed.data.prompt.substring(0, 200),
+    queued: needsQueue,
+  });
 
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
 
-      const sendEvent = (event: InvocationEvent) => {
+      const sendEvent = (event: InvocationEvent | { type: "queued"; position: number }) => {
         controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
       };
 
       try {
+        // If queued, send the queued event and wait for our turn
+        if (queuePromise) {
+          sendEvent({ type: "queued", position: instanceQueue.depth(name) });
+          logInfo(`api.invoke | queued`, { instanceName: name, position: instanceQueue.depth(name) });
+          await queuePromise;
+          logInfo(`api.invoke | dequeued`, { instanceName: name });
+        }
+
         await withSpan("api.invoke", "http.handler", async () => {
           for await (const event of executeInvocation(instance, parsed.data.prompt, abortController)) {
             sendEvent(event);
@@ -65,6 +103,8 @@ invokeRoutes.post("/v1/instances/*", async (c, next) => {
         const errorEvent: InvocationEvent = { type: "error", invocationId: "unknown", error: errorMsg, code: "stream_error" };
         controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`));
       } finally {
+        instance.queueDepth = instanceQueue.depth(name);
+        drainNext(name);
         controller.close();
       }
     },

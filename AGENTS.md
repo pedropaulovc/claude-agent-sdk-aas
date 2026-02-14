@@ -45,8 +45,9 @@ Deployed to [Railway](https://railway.app) as a long-lived container. Railway au
 src/
 ├── index.ts              # Entry: init Sentry, start server
 ├── server.ts             # Hono app + route wiring
-├── routes/               # API route handlers (health, instances)
+├── routes/               # API route handlers (health, instances, invoke)
 ├── registry/             # Instance store + types (AgentInstance, Zod schemas)
+├── queue/                # Per-instance FIFO invocation queue
 ├── sdk/                  # SDK executor, event mapping, OTEL env
 └── telemetry/            # Sentry init, helpers, middleware
 ```

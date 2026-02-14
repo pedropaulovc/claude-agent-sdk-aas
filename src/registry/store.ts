@@ -1,4 +1,5 @@
 import { logInfo, countMetric, withSpan } from "../telemetry/helpers.js";
+import { instanceQueue } from "../queue/instance-queue.js";
 import type { AgentInstance, ProvisionRequest, UpdateRequest } from "./types.js";
 
 export class StoreError extends Error {
@@ -85,6 +86,7 @@ export class InstanceStore {
   delete(name: string): number {
     const deleted = this.instances.delete(name) ? 1 : 0;
     if (deleted) {
+      instanceQueue.clear(name);
       logInfo(`${name} | delete`);
       countMetric("instance.count", -1);
     }
@@ -99,6 +101,8 @@ export class InstanceStore {
     const toDelete = Array.from(this.instances.keys()).filter(
       (name) => name === prefix || name.startsWith(`${prefix}/`),
     );
+
+    instanceQueue.clearByPrefix(prefix);
 
     for (const name of toDelete) {
       this.instances.delete(name);

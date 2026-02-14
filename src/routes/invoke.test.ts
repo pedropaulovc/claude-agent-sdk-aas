@@ -34,6 +34,7 @@ vi.mock("../sdk/executor.js", () => ({
 // Import after mocks
 const { app } = await import("../server.js");
 const { store } = await import("../registry/store.js");
+const { instanceQueue } = await import("../queue/instance-queue.js");
 
 // Helper: create mock async generator from events
 async function* mockGenerator(events: InvocationEvent[]): AsyncGenerator<InvocationEvent> {
@@ -78,6 +79,8 @@ describe("POST /v1/instances/*/invoke", () => {
   beforeEach(() => {
     store.clear();
     vi.clearAllMocks();
+    // Clear any leftover queue state
+    instanceQueue.clearByPrefix("");
   });
 
   it("returns 200 with SSE content-type for valid prompt", async () => {
@@ -282,5 +285,89 @@ describe("POST /v1/instances/*/invoke", () => {
     expect(instance.name).toBe("test/agent");
     expect(prompt).toBe("Do the thing");
     expect(abortCtrl).toBeInstanceOf(AbortController);
+  });
+
+  it("returns 429 with queue_full code when queue is full", async () => {
+    await provisionTestInstance("busy/agent", "running");
+
+    // Fill the queue to max (25)
+    for (let i = 0; i < 25; i++) {
+      instanceQueue.enqueue("busy/agent", `prompt-${i}`, new AbortController());
+    }
+
+    const res = await app.request("/v1/instances/busy/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "overflow" }),
+    });
+
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.error).toContain("Queue full");
+    expect(body.code).toBe("queue_full");
+  });
+
+  it("sends queued event when instance is running then proceeds after resolve", async () => {
+    await provisionTestInstance("q/agent", "running");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-q", instanceName: "q/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-q", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-q" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    // Start the invoke request (instance is running, so it will be queued)
+    const responsePromise = app.request("/v1/instances/q/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Queued prompt" }),
+    });
+
+    // Give the stream time to send the queued event
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Now dequeue and resolve the queued invocation to unblock it
+    const queued = instanceQueue.dequeue("q/agent");
+    if (!queued) throw new Error("expected queued item");
+    queued.resolve();
+
+    const res = await responsePromise;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/event-stream");
+
+    const text = await res.text();
+    const parsed = parseSSE(text);
+
+    // First event should be "queued"
+    expect(parsed[0].event).toBe("queued");
+    const queuedData = parsed[0].data as Record<string, unknown>;
+    expect(queuedData.position).toBeDefined();
+
+    // After unblocking, normal events should follow
+    expect(parsed[1].event).toBe("init");
+    expect(parsed[parsed.length - 1].event).toBe("done");
+  });
+
+  it("does not send queued event when instance is ready", async () => {
+    await provisionTestInstance("ready/agent");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-1", instanceName: "ready/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-1", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-1" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    const res = await app.request("/v1/instances/ready/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Go" }),
+    });
+
+    const text = await res.text();
+    const parsed = parseSSE(text);
+
+    // No queued event — starts directly with init
+    expect(parsed[0].event).toBe("init");
+    expect(parsed.find((e) => e.event === "queued")).toBeUndefined();
   });
 });
