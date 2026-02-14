@@ -465,16 +465,18 @@
 
   #send-btn {
     background: var(--bg-3);
-    border: 1px solid var(--border);
-    color: var(--text-2);
+    border: 1px solid var(--amber-dim);
+    color: var(--amber);
     font-family: var(--font);
     font-size: 12px;
     padding: 6px 14px;
     border-radius: 3px;
-    cursor: not-allowed;
-    opacity: 0.5;
+    cursor: pointer;
     flex-shrink: 0;
+    transition: background 0.1s;
   }
+  #send-btn:hover { background: var(--amber-glow); }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* ── STATUS BAR ── */
   #status-bar {
@@ -560,6 +562,202 @@
     #hamburger { display: block; }
   }
 
+  /* ── NUKE BUTTONS ── */
+  .nuke-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-3);
+    font-family: var(--font);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.1s, border-color 0.1s;
+    flex-shrink: 0;
+  }
+  .tree-row:hover .nuke-btn { opacity: 1; }
+  .nuke-btn:hover { color: var(--red); border-color: var(--red-dim); }
+
+  .nuke-btn-detail {
+    background: none;
+    border: 1px solid var(--red-dim);
+    color: var(--red);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-left: auto;
+    transition: background 0.1s;
+  }
+  .nuke-btn-detail:hover { background: var(--red-dim); }
+
+  .nuke-all-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.1s, border-color 0.1s;
+  }
+  .nuke-all-btn:hover { color: var(--red); border-color: var(--red-dim); }
+
+  /* ── CONFIRM DIALOG ── */
+  .dialog-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+  }
+
+  .dialog-box {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    max-width: 400px;
+    width: 90%;
+  }
+
+  .dialog-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-0);
+    margin-bottom: 12px;
+  }
+
+  .dialog-msg {
+    font-size: 12px;
+    color: var(--text-1);
+    margin-bottom: 20px;
+    line-height: 1.6;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .dialog-cancel {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    color: var(--text-1);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .dialog-cancel:hover { color: var(--text-0); }
+
+  .dialog-confirm {
+    background: var(--red-dim);
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .dialog-confirm:hover { background: var(--red); color: var(--text-0); }
+
+  /* ── TOAST ── */
+  .toast {
+    position: fixed;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    color: var(--text-0);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 8px 20px;
+    border-radius: 4px;
+    z-index: 300;
+    animation: toast-in 0.2s ease, toast-out 0.3s ease 2.5s forwards;
+  }
+  @keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%); } }
+  @keyframes toast-out { to { opacity: 0; transform: translateX(-50%) translateY(-10px); } }
+
+  /* ── INLINE RESPONSE ── */
+  #response-area {
+    display: none;
+    background: var(--bg-2);
+    border-top: 1px solid var(--border-subtle);
+    padding: 10px 16px;
+    font-size: 12px;
+    max-height: 200px;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  #response-area.visible { display: block; }
+
+  #response-area::-webkit-scrollbar { width: 4px; }
+  #response-area::-webkit-scrollbar-track { background: transparent; }
+  #response-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .response-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .response-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+
+  .response-close {
+    background: none;
+    border: none;
+    color: var(--text-3);
+    font-family: var(--font);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .response-close:hover { color: var(--text-0); }
+
+  #response-content {
+    color: var(--text-1);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .response-tool {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 4px 8px;
+    margin: 4px 0;
+    color: var(--yellow);
+    font-size: 11px;
+  }
+
+  .response-summary {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-subtle);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+
   /* ── LOADING SKELETON ── */
   @keyframes shimmer {
     0% { background-position: -200px 0; }
@@ -587,8 +785,9 @@
         <span>AAS Control</span>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:8px">
+    <div style="display:flex;align-items:center;gap:12px">
       <span style="font-size:10px;color:var(--text-3);letter-spacing:0.1em">AGENT SDK</span>
+      <button class="nuke-all-btn" onclick="window.__nukeAll()">Nuke All</button>
     </div>
   </header>
 
@@ -631,13 +830,22 @@
       <div id="detail-content"></div>
     </div>
 
+    <!-- Response area (inline SSE response) -->
+    <div id="response-area">
+      <div class="response-header">
+        <span class="response-label">Response</span>
+        <button class="response-close" onclick="window.__closeResponse()">&times;</button>
+      </div>
+      <div id="response-content"></div>
+    </div>
+
     <!-- Send panel -->
     <div id="send-panel">
       <select id="send-instance" title="Select instance">
         <option value="">Select instance...</option>
       </select>
-      <input id="send-prompt" type="text" placeholder="Message..." disabled>
-      <button id="send-btn" disabled>Send</button>
+      <input id="send-prompt" type="text" placeholder="Message...">
+      <button id="send-btn" onclick="window.__sendMessage()">Send</button>
     </div>
   </div>
 
@@ -742,6 +950,7 @@
       html += '<div class="tree-row" style="padding-left:' + (12 + pad) + 'px" onclick="window.__togglePrefix(this, \'' + escHtml(fullPath) + '\')">';
       html += '<span class="tree-chevron open">&#9654;</span>';
       html += '<span class="tree-label">' + escHtml(key) + '/</span>';
+      html += '<button class="nuke-btn" onclick="window.__nukePrefix(\'' + escHtml(fullPath) + '\', event)" title="Nuke prefix">x</button>';
       html += '</div>';
       html += '<div class="tree-children open">' + childHtml + '</div>';
       html += '</div>';
@@ -831,6 +1040,7 @@
       '<div class="detail-header">' +
         '<span class="status-dot ' + statusClass + '"></span>' +
         '<span class="detail-name">' + escHtml(inst.name) + '</span>' +
+        '<button class="nuke-btn-detail" onclick="window.__nukeInstance(\'' + escHtml(inst.name) + '\')">Delete</button>' +
       '</div>' +
       '<div class="detail-grid">' +
         '<div class="detail-label">Status</div><div class="detail-value">' + escHtml(inst.status) + '</div>' +
@@ -1054,6 +1264,229 @@
       }
     });
   }
+
+  // ── CONFIRM DIALOG ──
+  function showConfirm(title, msg, onConfirm) {
+    var overlay = document.createElement("div");
+    overlay.className = "dialog-overlay";
+    overlay.innerHTML =
+      '<div class="dialog-box">' +
+        '<div class="dialog-title">' + escHtml(title) + '</div>' +
+        '<div class="dialog-msg">' + escHtml(msg) + '</div>' +
+        '<div class="dialog-actions">' +
+          '<button class="dialog-cancel">Cancel</button>' +
+          '<button class="dialog-confirm">Confirm</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector(".dialog-cancel").addEventListener("click", function () {
+      document.body.removeChild(overlay);
+    });
+    overlay.querySelector(".dialog-confirm").addEventListener("click", function () {
+      document.body.removeChild(overlay);
+      onConfirm();
+    });
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) document.body.removeChild(overlay);
+    });
+  }
+
+  // ── TOAST ──
+  function showToast(msg) {
+    var toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(function () {
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 3000);
+  }
+
+  // ── NUKE BY PREFIX ──
+  window.__nukePrefix = function (prefix, event) {
+    if (event) { event.stopPropagation(); }
+    var matching = instances.filter(function (i) { return i.name.startsWith(prefix + "/") || i.name === prefix; });
+    showConfirm(
+      "Nuke prefix",
+      "Delete all instances under \"" + prefix + "/\"? (" + matching.length + " instance" + (matching.length !== 1 ? "s" : "") + ") This will cancel active invocations.",
+      function () {
+        fetch("/v1/instances/" + encodeURIComponent(prefix), { method: "DELETE" })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            showToast("Deleted " + (data.deleted || 0) + " instance(s)");
+            fetchInstances();
+          })
+          .catch(function () { showToast("Nuke failed"); });
+      }
+    );
+  };
+
+  // ── NUKE SINGLE INSTANCE ──
+  window.__nukeInstance = function (name) {
+    showConfirm(
+      "Delete instance",
+      "Delete instance \"" + name + "\"? This will cancel any active invocation.",
+      function () {
+        fetch("/v1/instances/" + encodeURIComponent(name), { method: "DELETE" })
+          .then(function (res) {
+            if (res.ok) {
+              showToast("Deleted \"" + name + "\"");
+              selectedInstance = null;
+              showLogView();
+              fetchInstances();
+            } else {
+              return res.json().then(function (d) { showToast(d.error || "Delete failed"); });
+            }
+          })
+          .catch(function () { showToast("Delete failed"); });
+      }
+    );
+  };
+
+  // ── NUKE ALL ──
+  window.__nukeAll = function () {
+    showConfirm(
+      "Nuke ALL instances",
+      "Delete ALL " + instances.length + " instances? This cannot be undone.",
+      function () {
+        // Double confirm
+        showConfirm(
+          "Are you sure?",
+          "This will permanently delete ALL instances and cancel all active invocations.",
+          function () {
+            fetch("/v1/instances/", { method: "DELETE" })
+              .then(function (res) { return res.json(); })
+              .then(function (data) {
+                showToast("Deleted " + (data.deleted || 0) + " instance(s)");
+                selectedInstance = null;
+                showLogView();
+                fetchInstances();
+              })
+              .catch(function () { showToast("Nuke All failed"); });
+          }
+        );
+      }
+    );
+  };
+
+  // ── SEND MESSAGE ──
+  var responseArea = document.getElementById("response-area");
+  var responseContent = document.getElementById("response-content");
+  var sendBtn = document.getElementById("send-btn");
+  var sendPromptInput = document.getElementById("send-prompt");
+  var activeSendAbort = null;
+
+  window.__sendMessage = function () {
+    var instanceName = sendInstanceSelect.value;
+    var prompt = sendPromptInput.value.trim();
+    if (!instanceName) { showToast("Select an instance first"); return; }
+    if (!prompt) { showToast("Enter a message"); return; }
+
+    // Disable send while streaming
+    sendBtn.disabled = true;
+    sendPromptInput.value = "";
+
+    // Show response area
+    responseContent.innerHTML = "";
+    responseArea.classList.add("visible");
+
+    activeSendAbort = new AbortController();
+
+    fetch("/v1/instances/" + encodeURIComponent(instanceName) + "/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: prompt }),
+      signal: activeSendAbort.signal,
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.json().then(function (d) {
+          responseContent.textContent = "Error: " + (d.error || res.statusText);
+          sendBtn.disabled = false;
+        });
+      }
+
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+
+      function processChunk() {
+        reader.read().then(function (result) {
+          if (result.done) {
+            sendBtn.disabled = false;
+            fetchInstances();
+            return;
+          }
+
+          buffer += decoder.decode(result.value, { stream: true });
+          var lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.startsWith("data: ")) {
+              try {
+                var event = JSON.parse(line.substring(6));
+                renderResponseEvent(event);
+              } catch (_) { /* skip malformed */ }
+            }
+          }
+
+          processChunk();
+        }).catch(function () {
+          sendBtn.disabled = false;
+        });
+      }
+
+      processChunk();
+    }).catch(function (err) {
+      if (err.name !== "AbortError") {
+        responseContent.textContent = "Error: " + err.message;
+      }
+      sendBtn.disabled = false;
+    });
+  };
+
+  function renderResponseEvent(event) {
+    if (event.type === "assistant_text") {
+      // Append text content
+      var textNode = document.createTextNode(event.text || "");
+      responseContent.appendChild(textNode);
+      responseArea.scrollTop = responseArea.scrollHeight;
+    } else if (event.type === "tool_use") {
+      var toolDiv = document.createElement("div");
+      toolDiv.className = "response-tool";
+      toolDiv.textContent = "Tool: " + (event.name || "unknown") + (event.input ? " — " + JSON.stringify(event.input).substring(0, 100) : "");
+      responseContent.appendChild(toolDiv);
+      responseArea.scrollTop = responseArea.scrollHeight;
+    } else if (event.type === "done") {
+      var summary = document.createElement("div");
+      summary.className = "response-summary";
+      summary.textContent = "Done — " + (event.turns || 0) + " turns, $" + ((event.costUsd || 0).toFixed(4)) + ", " + (event.durationMs || 0) + "ms";
+      responseContent.appendChild(summary);
+      responseArea.scrollTop = responseArea.scrollHeight;
+    } else if (event.type === "error") {
+      var errDiv = document.createElement("div");
+      errDiv.style.color = "var(--red)";
+      errDiv.textContent = "Error: " + (event.error || "unknown");
+      responseContent.appendChild(errDiv);
+    }
+  }
+
+  window.__closeResponse = function () {
+    responseArea.classList.remove("visible");
+    if (activeSendAbort) {
+      activeSendAbort.abort();
+      activeSendAbort = null;
+    }
+  };
+
+  // Enter key sends message
+  sendPromptInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      window.__sendMessage();
+    }
+  });
 
   // ── INIT ──
   fetchInstances();
