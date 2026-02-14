@@ -41,4 +41,28 @@ describe("buildOtelEnv", () => {
 
     expect(result).toEqual({});
   });
+
+  it("includes TRACEPARENT when traceparent is provided", () => {
+    const dsn = "https://abc123@o12345.ingest.sentry.io/67890";
+    const traceparent = "00-abcdef1234567890abcdef1234567890-1234567890abcdef-01";
+    const result = buildOtelEnv(dsn, traceparent);
+
+    expect(result.TRACEPARENT).toBe(traceparent);
+    // Other OTEL vars should still be present
+    expect(result.OTEL_EXPORTER_OTLP_ENDPOINT).toBeDefined();
+  });
+
+  it("does not include TRACEPARENT when traceparent is omitted", () => {
+    const dsn = "https://abc123@o12345.ingest.sentry.io/67890";
+    const result = buildOtelEnv(dsn);
+
+    expect(result.TRACEPARENT).toBeUndefined();
+  });
+
+  it("returns only TRACEPARENT when DSN is undefined but traceparent is provided", () => {
+    const traceparent = "00-abcdef1234567890abcdef1234567890-1234567890abcdef-01";
+    const result = buildOtelEnv(undefined, traceparent);
+
+    expect(result).toEqual({ TRACEPARENT: traceparent });
+  });
 });

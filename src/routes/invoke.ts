@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { z } from "zod";
+import * as Sentry from "@sentry/node";
 import { store } from "../registry/store.js";
 import { executeInvocation } from "../sdk/executor.js";
+import type { TraceContext } from "../sdk/executor.js";
 import { instanceQueue, QueueFullError } from "../queue/instance-queue.js";
 import { jsonResponse } from "../telemetry/middleware.js";
 import { logInfo, logError, withSpan, countMetric } from "../telemetry/helpers.js";
@@ -69,10 +71,13 @@ invokeRoutes.post("/v1/instances/*", async (c, next) => {
     }
   }
 
+  const traceContext: TraceContext | undefined = parsed.data.traceContext;
+
   logInfo(`api.invoke | start`, {
     instanceName: name,
     prompt: parsed.data.prompt.substring(0, 200),
     queued: needsQueue,
+    hasTraceContext: !!traceContext,
   });
 
   const stream = new ReadableStream({
@@ -83,7 +88,7 @@ invokeRoutes.post("/v1/instances/*", async (c, next) => {
         controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
       };
 
-      try {
+      const runInvocation = async () => {
         // If queued, send the queued event and wait for our turn
         if (queuePromise) {
           sendEvent({ type: "queued", position: instanceQueue.depth(name) });
@@ -93,10 +98,23 @@ invokeRoutes.post("/v1/instances/*", async (c, next) => {
         }
 
         await withSpan("api.invoke", "http.handler", async () => {
-          for await (const event of executeInvocation(instance, parsed.data.prompt, abortController)) {
+          for await (const event of executeInvocation(instance, parsed.data.prompt, abortController, traceContext)) {
             sendEvent(event);
           }
         });
+      };
+
+      try {
+        // If caller provided traceContext, continue their distributed trace
+        // so this invocation appears as a child span in their trace.
+        if (traceContext) {
+          await Sentry.continueTrace(
+            { sentryTrace: traceContext.sentryTrace, baggage: traceContext.baggage },
+            runInvocation,
+          );
+        } else {
+          await runInvocation();
+        }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         logError("api.invoke | stream_error", { instanceName: name, error: errorMsg });

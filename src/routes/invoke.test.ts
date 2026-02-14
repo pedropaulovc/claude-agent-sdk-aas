@@ -370,4 +370,113 @@ describe("POST /v1/instances/*/invoke", () => {
     expect(parsed[0].event).toBe("init");
     expect(parsed.find((e) => e.event === "queued")).toBeUndefined();
   });
+
+  it("passes traceContext to executeInvocation when provided in body", async () => {
+    await provisionTestInstance("trace/agent");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-1", instanceName: "trace/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-1", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-1" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    const traceContext = {
+      sentryTrace: "abc123def456789012345678901234-1234567890abcdef-1",
+      baggage: "sentry-trace_id=abc123",
+    };
+
+    const res = await app.request("/v1/instances/trace/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Traced prompt", traceContext }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text(); // consume the stream
+
+    expect(mockExecuteInvocation).toHaveBeenCalledOnce();
+    const passedTraceContext = mockExecuteInvocation.mock.calls[0][3];
+    expect(passedTraceContext).toEqual(traceContext);
+  });
+
+  it("calls Sentry.continueTrace when traceContext is provided", async () => {
+    const Sentry = await import("@sentry/node");
+    await provisionTestInstance("sentry-trace/agent");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-1", instanceName: "sentry-trace/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-1", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-1" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    const traceContext = {
+      sentryTrace: "abc123def456789012345678901234-1234567890abcdef-1",
+      baggage: "sentry-trace_id=abc123",
+    };
+
+    const res = await app.request("/v1/instances/sentry-trace/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Traced", traceContext }),
+    });
+
+    await res.text(); // consume the stream
+    expect(Sentry.continueTrace).toHaveBeenCalledWith(
+      { sentryTrace: traceContext.sentryTrace, baggage: traceContext.baggage },
+      expect.any(Function),
+    );
+  });
+
+  it("does not call Sentry.continueTrace when traceContext is absent", async () => {
+    const Sentry = await import("@sentry/node");
+    // Clear any calls from other tests
+    vi.mocked(Sentry.continueTrace).mockClear();
+
+    await provisionTestInstance("no-trace/agent");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-1", instanceName: "no-trace/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-1", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-1" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    const res = await app.request("/v1/instances/no-trace/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "No trace" }),
+    });
+
+    await res.text(); // consume the stream
+
+    // continueTrace is called once by sentryMiddleware (with empty header strings),
+    // but NOT a second time from the invoke route for body traceContext.
+    expect(Sentry.continueTrace).toHaveBeenCalledTimes(1);
+    expect(Sentry.continueTrace).toHaveBeenCalledWith(
+      { sentryTrace: "", baggage: "" },
+      expect.any(Function),
+    );
+  });
+
+  it("passes undefined traceContext to executeInvocation when not provided", async () => {
+    await provisionTestInstance("notrace/agent");
+
+    const events: InvocationEvent[] = [
+      { type: "init", invocationId: "inv-1", instanceName: "notrace/agent", model: "claude-haiku-4-5-20251001", turn: 0 },
+      { type: "done", invocationId: "inv-1", turns: 0, costUsd: 0.001, durationMs: 50, stopReason: "end_turn", sessionId: "sess-1" },
+    ];
+    mockExecuteInvocation.mockReturnValue(mockGenerator(events));
+
+    const res = await app.request("/v1/instances/notrace/agent/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Plain prompt" }),
+    });
+
+    expect(res.status).toBe(200);
+    await res.text(); // consume the stream
+
+    expect(mockExecuteInvocation).toHaveBeenCalledOnce();
+    const passedTraceContext = mockExecuteInvocation.mock.calls[0][3];
+    expect(passedTraceContext).toBeUndefined();
+  });
 });

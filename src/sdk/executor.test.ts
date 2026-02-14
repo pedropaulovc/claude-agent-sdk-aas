@@ -13,6 +13,10 @@ vi.mock("@sentry/node", async () => {
         spanContext: () => ({ traceId: "test-trace" }),
       }),
     ),
+    getActiveSpan: vi.fn(() => ({
+      spanContext: () => ({ traceId: "aaa111aaa111aaa111aaa111aaa111aa", spanId: "bbb222bbb222bbb2" }),
+    })),
+    continueTrace: vi.fn((_traceData, cb) => cb()),
     logger: {
       info: vi.fn(),
       warn: vi.fn(),
@@ -495,6 +499,63 @@ describe("executeInvocation", () => {
 
     await collectEvents(executeInvocation(instance, "Second", new AbortController()));
     expect(instance.invocationCount).toBe(2);
+  });
+
+  it("includes TRACEPARENT in env when active span exists", async () => {
+    mockQuery.mockReturnValue(mockSdkMessages([
+      {
+        type: "result",
+        subtype: "success",
+        total_cost_usd: 0.01,
+        duration_ms: 100,
+        duration_api_ms: 80,
+        is_error: false,
+        num_turns: 0,
+        result: "",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+        session_id: "sess-1",
+        uuid: "00000000-0000-0000-0000-000000000001",
+      },
+    ]));
+
+    const instance = makeInstance();
+    await collectEvents(executeInvocation(instance, "Hello", new AbortController()));
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.env.TRACEPARENT).toBe(
+      "00-aaa111aaa111aaa111aaa111aaa111aa-bbb222bbb222bbb2-01",
+    );
+  });
+
+  it("passes traceContext parameter through without error", async () => {
+    mockQuery.mockReturnValue(mockSdkMessages([
+      {
+        type: "result",
+        subtype: "success",
+        total_cost_usd: 0.01,
+        duration_ms: 100,
+        duration_api_ms: 80,
+        is_error: false,
+        num_turns: 0,
+        result: "",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {},
+        permission_denials: [],
+        session_id: "sess-1",
+        uuid: "00000000-0000-0000-0000-000000000001",
+      },
+    ]));
+
+    const instance = makeInstance();
+    const traceContext = { sentryTrace: "abc123-def456-1", baggage: "sentry-trace_id=abc123" };
+    const events = await collectEvents(executeInvocation(instance, "Hello", new AbortController(), traceContext));
+
+    // Should complete normally — the traceContext is accepted without error
+    expect(events.some((e) => e.type === "done")).toBe(true);
   });
 
   it("ignores non-assistant non-result SDK messages", async () => {

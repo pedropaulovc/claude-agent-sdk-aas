@@ -1,11 +1,17 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServerConfig as SdkMcpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import * as Sentry from "@sentry/node";
 import { randomUUID } from "crypto";
 import type { AgentInstance } from "../registry/types.js";
 import type { InvocationEvent } from "./events.js";
 import { mapAssistantMessage, mapResultMessage } from "./events.js";
 import { buildOtelEnv } from "./env.js";
 import { logInfo, logError, chunkedLog, countMetric, distributionMetric } from "../telemetry/helpers.js";
+
+export interface TraceContext {
+  sentryTrace: string;
+  baggage: string;
+}
 
 // Convert our McpServerConfig[] to the SDK's Record<string, McpServerConfig> format
 function buildSdkMcpServers(servers: AgentInstance["mcpServers"]): Record<string, SdkMcpServerConfig> {
@@ -26,6 +32,7 @@ export async function* executeInvocation(
   instance: AgentInstance,
   prompt: string,
   abortController: AbortController,
+  traceContext?: TraceContext,
 ): AsyncGenerator<InvocationEvent> {
   const invocationId = randomUUID();
   const startTime = Date.now();
@@ -38,14 +45,27 @@ export async function* executeInvocation(
   instance.invocationCount++;
   instance.lastInvokedAt = new Date();
 
-  logInfo(`${instance.name} | invoke.start`, { invocationId, prompt: prompt.substring(0, 200) });
+  logInfo(`${instance.name} | invoke.start`, {
+    invocationId,
+    prompt: prompt.substring(0, 200),
+    hasTraceContext: !!traceContext,
+  });
   chunkedLog(`${instance.name} | prompt`, prompt);
   countMetric("invoke.count", 1, { instance: instance.name, model: instance.model });
 
   yield { type: "init", invocationId, instanceName: instance.name, model: instance.model, turn: 0 };
 
   try {
-    const otelEnv = buildOtelEnv(process.env["SENTRY_DSN"]);
+    // Build TRACEPARENT from active Sentry span so the SDK subprocess
+    // joins the same distributed trace as the caller.
+    let traceparent: string | undefined;
+    const activeSpan = Sentry.getActiveSpan();
+    const spanContext = activeSpan?.spanContext();
+    if (spanContext) {
+      traceparent = `00-${spanContext.traceId}-${spanContext.spanId}-01`;
+    }
+
+    const otelEnv = buildOtelEnv(process.env["SENTRY_DSN"], traceparent);
 
     const q = query({
       prompt,
