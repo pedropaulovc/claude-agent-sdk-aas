@@ -17,15 +17,14 @@ graph TD
 As a developer, I want a working project skeleton so I can start building the service.
 
 ### Description
-Initialize the project with npm, TypeScript, ESLint, Vitest, Hono server, and a basic health endpoint. Include Dockerfile for container deployment.
+Initialize the project with npm, TypeScript, ESLint, Vitest, Hono server, and a basic health endpoint. Railway uses Railpack (zero-config builder) to auto-detect from `package.json` — no Dockerfile needed. Add `@railway/cli` as a dev dependency for easy deploys.
 
 ### Files to create
 | File | Purpose |
 |------|---------|
-| `package.json` | Dependencies: hono, @hono/node-server, @anthropic-ai/claude-agent-sdk, @sentry/node, zod, typescript, vitest, tsx, eslint |
+| `package.json` | Dependencies: hono, @hono/node-server, @anthropic-ai/claude-agent-sdk, @sentry/node, zod, typescript, vitest, tsx, eslint, @railway/cli (dev) |
 | `tsconfig.json` | Strict mode, ES2022 target, Node module resolution |
 | `.eslintrc.json` | TypeScript ESLint config |
-| `Dockerfile` | Multi-stage build: npm ci -> tsc -> node dist/index.js |
 | `src/index.ts` | Entry point: start Hono server on PORT |
 | `src/server.ts` | Hono app with route wiring |
 | `src/routes/health.ts` | GET /v1/health -> { status: "ok", uptime, instanceCount: 0 } |
@@ -39,10 +38,12 @@ Initialize the project with npm, TypeScript, ESLint, Vitest, Hono server, and a 
 - [ ] [AC-1.0.5] `npm run typecheck` passes with strict mode
 - [ ] [AC-1.0.6] `npm run lint` passes
 - [ ] [AC-1.0.7] `npm run test` runs Vitest (health route test passes)
-- [ ] [AC-1.0.8] Dockerfile builds and runs successfully
+- [ ] [AC-1.0.8] Railpack builds and deploys successfully (auto-detected from `package.json`)
+- [ ] [AC-1.0.9] `npm run deploy` runs `railway up -d` for one-command deployment
+- [ ] [AC-1.0.10] `railway link` connects project to Railway service (one-time setup documented in AGENTS.md)
 
 ### Demo
-Start the server, curl the health endpoint, show response.
+Start the server, curl the health endpoint, show response. Deploy to Railway with `npm run deploy`, show health endpoint on Railway URL.
 
 ---
 

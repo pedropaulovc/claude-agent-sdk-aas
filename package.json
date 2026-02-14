@@ -1,0 +1,32 @@
+{
+  "name": "claude-agent-sdk-aas",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "npx @railway/cli@latest up -d"
+  },
+  "dependencies": {
+    "hono": "^4",
+    "@hono/node-server": "^1",
+    "@anthropic-ai/claude-agent-sdk": "^0",
+    "@sentry/node": "^9",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^3",
+    "tsx": "^4",
+    "eslint": "^9",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "@types/node": "^22",
+    "@railway/cli": "^3"
+  }
+}
