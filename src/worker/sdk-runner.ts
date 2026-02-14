@@ -114,6 +114,10 @@ export class SdkRunner {
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
       abortController,
+      stderr: (data: string) => {
+        logInfo("SDK stderr", { invocationId, data });
+        console.log("[DEBUG sdk-runner] STDERR:", data);
+      },
     };
 
     if (Object.keys(mcpServers).length > 0) {
@@ -137,10 +141,14 @@ export class SdkRunner {
       return;
     }
 
+    console.log("[DEBUG sdk-runner] SDK QUERY STARTED", { invocationId });
+
     let lastAssistantHadContent = false;
 
     try {
       for await (const msg of q) {
+        console.log("[DEBUG sdk-runner] SDK MSG:", msg.type, "subtype" in msg ? (msg as Record<string, unknown>).subtype : "", { invocationId });
+
         if (signal.aborted) {
           break;
         }
@@ -197,8 +205,10 @@ export class SdkRunner {
           }
         }
       }
+      console.log("[DEBUG sdk-runner] SDK LOOP DONE", { invocationId });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage });
       logError("SDK invocation threw", { invocationId, error: errorMessage });
       countMetric("invocation.error", 1, { instanceName: this.config.instanceName });
       yield {
@@ -315,7 +325,11 @@ async function* withSpanGenerator(
   // We can't use withSpan directly since it returns Promise<T>, not AsyncGenerator.
   // Instead, we call the function directly and rely on the telemetry
   // from logInfo/countMetric/distributionMetric within the runner.
-  yield* await withSpan(name, op, async () => {
+  console.log("[DEBUG sdk-runner] withSpanGenerator ENTER", { name, op });
+  const gen = await withSpan(name, op, async () => {
     return fn();
   });
+  console.log("[DEBUG sdk-runner] withSpanGenerator GOT GENERATOR, starting yield*");
+  yield* gen;
+  console.log("[DEBUG sdk-runner] withSpanGenerator yield* COMPLETE");
 }
