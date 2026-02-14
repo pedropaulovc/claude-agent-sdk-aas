@@ -1,0 +1,31 @@
+import type { Context } from "hono";
+import { createMiddleware } from "hono/factory";
+import * as Sentry from "@sentry/node";
+
+export const sentryMiddleware = createMiddleware(async (c, next) => {
+  const sentryTrace = c.req.header("sentry-trace") ?? "";
+  const baggage = c.req.header("baggage") ?? "";
+
+  return Sentry.continueTrace({ sentryTrace, baggage }, () => {
+    return Sentry.startSpan(
+      { name: `${c.req.method} ${c.req.path}`, op: "http.server" },
+      async (span) => {
+        await next();
+        const traceId = span.spanContext().traceId;
+        c.header("x-sentry-trace-id", traceId);
+      },
+    );
+  });
+});
+
+export function jsonResponse<T extends Record<string, unknown>>(
+  c: Context,
+  data: T,
+  status: 200 | 201 | 400 | 404 | 409 | 429 | 500 = 200,
+): Response {
+  const traceId = Sentry.getActiveSpan()?.spanContext().traceId;
+  if (traceId) {
+    c.header("x-sentry-trace-id", traceId);
+  }
+  return c.json(data, status);
+}
