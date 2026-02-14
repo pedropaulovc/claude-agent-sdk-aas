@@ -40,13 +40,18 @@ Send a user message to the agent. Returns an SSE stream of events as the agent p
 
 ```typescript
 {
-  "message": "What do you think about the new project?"
+  "message": "What do you think about the new project?",
+  "traceContext": {           // optional, forwarded by control plane
+    "sentryTrace": "...",
+    "baggage": "..."
+  }
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `message` | string | Yes | Non-empty user message |
+| `traceContext` | object | No | Forwarded by control plane from caller. Worker uses it to continue the distributed trace. |
 
 Returns 400 if `message` is missing or empty.
 
@@ -196,13 +201,12 @@ Reset the worker's session and clear conversation history.
 { "reset": true, "instanceName": "dev/A/michael" }
 ```
 
-This:
-1. Aborts any active invocation
-2. Clears the invocation queue
-3. Resets `sessionId` to null
-4. Clears the conversation history
+When no invocation is currently running, this:
+1. Clears the invocation queue
+2. Resets `sessionId` to null
+3. Clears the conversation history
 
-Cannot reset while an invocation is running → 409 Conflict. Callers should abort first.
+If an invocation is running, the reset is rejected → 409 Conflict. Callers should abort the invocation first.
 
 ## Error Handling
 

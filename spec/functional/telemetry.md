@@ -15,7 +15,7 @@ Sentry.init({
   environment: 'production',
   serverName: 'aas-control-plane',
   beforeSendSpan: (span) => {
-    console.log(`[sentry] ${span.op} | ${span.description} | ${span.timestamp - span.start_timestamp}ms | trace=${span.trace_id}`);
+    console.log(`[sentry] ${span.op} | ${span.description} | ${(span.timestamp - span.start_timestamp) * 1000}ms | trace=${span.trace_id}`);
     return span;
   }
 });
@@ -28,7 +28,7 @@ Sentry.init({
   environment: 'production',
   serverName: `aas-worker-${process.env.AAS_INSTANCE_NAME}`,
   beforeSendSpan: (span) => {
-    console.log(`[sentry] ${span.op} | ${span.description} | ${span.timestamp - span.start_timestamp}ms | trace=${span.trace_id}`);
+    console.log(`[sentry] ${span.op} | ${span.description} | ${(span.timestamp - span.start_timestamp) * 1000}ms | trace=${span.trace_id}`);
     return span;
   }
 });
@@ -145,7 +145,7 @@ Every incoming HTTP request is instrumented (both roles):
 3. Attach trace ID to response as `x-sentry-trace-id` header
 4. Log: `[sentry] http.server | {METHOD} {PATH} | {duration}ms | trace={TRACE_ID}`
 
-All API routes MUST use `jsonResponse()` / `emptyResponse()` helpers instead of raw `Response` constructors. These helpers automatically attach the `x-sentry-trace-id` response header.
+All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of raw `Response` constructors. These helpers automatically attach the `x-sentry-trace-id` response header.
 
 ## Metrics
 

@@ -233,7 +233,8 @@ Create `src/routes/proxy.ts` with routes that forward requests to workers. SSE s
 - [ ] `POST /v1/instances/{name}/message` → proxies to worker `POST /message`, streams SSE back
 - [ ] `GET /v1/instances/{name}/history` → proxies to worker `GET /history`
 - [ ] `GET /v1/instances/{name}/status` → proxies to worker `GET /status`
-- [ ] Guard: non-`ready` status → 503 with current status
+- [ ] Guard for `/message`: non-`ready` status → 503 with current status
+- [ ] Guard for `/history`, `/status`: allowed when `ready` or `unreachable`, 503 otherwise
 - [ ] Instance not found → 404
 - [ ] Trace propagation: `sentry-trace` and `baggage` headers forwarded to worker
 - [ ] `proxy.count`, `proxy.duration_ms`, `proxy.error` metrics emitted
