@@ -100,15 +100,15 @@ Caller Span (external)
                               └── Tool Call C (grandchild span)
 ```
 
-### 1. Incoming Trace Propagation (Control Plane)
+### 1. Incoming Trace Propagation (Both Roles)
 
-HTTP middleware extracts `sentry-trace` and `baggage` headers from incoming requests and continues the parent trace. All spans created during request handling are children of the incoming trace.
+HTTP middleware on **both** control plane and worker extracts `sentry-trace` and `baggage` headers from incoming requests, then calls `Sentry.continueTrace()` to create a server span that is a child of the caller's trace. All spans created during request handling are children of this server span.
 
-For the message endpoint, the request body's `traceContext` field is used instead of HTTP headers — this supports callers that cannot set custom headers (e.g., browser SSE via `EventSource`).
+On the control plane's message endpoint specifically, the request body's `traceContext` field takes precedence over HTTP headers — this supports callers that cannot set custom headers (e.g., browser SSE via `EventSource`).
 
 ### 2. Proxy Trace Propagation (Control Plane → Worker)
 
-When the control plane proxies a request to a worker, it attaches `sentry-trace` and `baggage` headers to the outgoing request. This makes the worker's spans appear as children of the control plane's proxy span.
+When the control plane proxies **any** request to a worker (`/message`, `/history`, `/status`), it attaches `sentry-trace` and `baggage` headers derived from the active span to the outgoing request. The worker's HTTP middleware picks these up via `continueTrace()`, making the worker's spans children of the control plane's proxy span. This creates an unbroken trace from caller → control plane → worker.
 
 ### 3. SDK Subprocess Tracing (Worker)
 

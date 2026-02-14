@@ -35,9 +35,17 @@ The control plane does **not** run the SDK itself. It proxies the request to the
 2. **Guard**: if instance status is not `ready`, return 503 with `{ error: "Instance not ready", status: "{current_status}" }`
 3. Forward `POST /message` to the worker's internal URL (`workerUrl`)
 4. Stream the worker's SSE response directly back to the caller (pass-through)
-5. Attach trace context headers to the proxied request
 
-The control plane adds `sentry-trace` and `baggage` headers to the proxied request for distributed tracing continuity.
+### Trace Context Propagation
+
+The control plane propagates distributed trace context on **every** proxied request (`/message`, `/history`, `/status`):
+
+1. **Incoming**: The control plane HTTP middleware extracts `sentry-trace` and `baggage` from the caller's request headers (standard W3C/Sentry propagation) and starts a server span via `Sentry.continueTrace()`
+2. **Body override** (message only): For `POST /message`, the `traceContext` body field takes precedence over HTTP headers — this supports callers that cannot set custom headers (e.g., browser `EventSource` for SSE)
+3. **Outgoing**: The control plane attaches `sentry-trace` and `baggage` headers to the proxied request to the worker, derived from the active span. This makes the worker's spans children of the control plane's proxy span.
+4. **Worker receives**: The worker's HTTP middleware extracts the incoming `sentry-trace` and `baggage` headers via `Sentry.continueTrace()`, connecting its spans to the caller's trace.
+
+This ensures a single unbroken trace from caller → control plane → worker → SDK.
 
 ## SSE Response
 
