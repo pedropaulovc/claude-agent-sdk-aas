@@ -262,6 +262,42 @@
   }
   #log-placeholder .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.3; }
 
+  /* Log line styles */
+  .log-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    padding: 1px 0;
+  }
+  .log-ts {
+    color: var(--text-3);
+    margin-right: 8px;
+    user-select: none;
+  }
+  .log-msg { }
+  .log-line.color-blue .log-msg { color: var(--blue); }
+  .log-line.color-green .log-msg { color: var(--green); }
+  .log-line.color-red .log-msg { color: var(--red); }
+  .log-line.color-yellow .log-msg { color: var(--yellow); }
+  .log-line.color-default .log-msg { color: var(--text-1); }
+
+  #resume-btn {
+    display: none;
+    position: sticky;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-3);
+    border: 1px solid var(--amber-dim);
+    color: var(--amber);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+    z-index: 5;
+  }
+  #resume-btn:hover { background: var(--amber-glow); }
+
   /* Instance detail view */
   #detail-view { display: none; flex-direction: column; overflow: hidden; }
   #detail-view.visible { display: flex; flex: 1; }
@@ -583,6 +619,7 @@
           Awaiting log stream&hellip;<br>
           <span style="font-size:11px;color:var(--text-3)">Logs will appear here when connected</span>
         </div>
+        <button id="resume-btn" onclick="window.__resumeAutoScroll()">Resume auto-scroll</button>
       </div>
     </div>
 
@@ -865,12 +902,163 @@
   // ── FILTER INPUT ──
   filterInput.addEventListener("input", function () {
     activeFilter = this.value.trim().toLowerCase();
-    // Filter will be used in S-3.1 when log lines are rendered
+    applyClientFilter();
   });
+
+  // ── LOG STREAM (SSE) ──
+  var logArea = document.getElementById("log-area");
+  var logPlaceholder = document.getElementById("log-placeholder");
+  var resumeBtn = document.getElementById("resume-btn");
+  var connDot = document.getElementById("conn-dot");
+  var connLabel = document.getElementById("conn-label");
+  var autoScroll = true;
+  var MAX_LOG_LINES = 1000;
+  var eventSource = null;
+  var reconnectTimer = null;
+
+  function getColorClass(level, message) {
+    if (level === "error" || message.indexOf("error") !== -1) return "color-red";
+    if (message.indexOf("provision") !== -1) return "color-blue";
+    if (message.indexOf("invoke") !== -1) return "color-green";
+    if (message.indexOf("tool_use") !== -1) return "color-yellow";
+    return "color-default";
+  }
+
+  function formatTime(isoStr) {
+    var d = new Date(isoStr);
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mm = String(d.getMinutes()).padStart(2, "0");
+    var ss = String(d.getSeconds()).padStart(2, "0");
+    return hh + ":" + mm + ":" + ss;
+  }
+
+  function appendLogLine(line) {
+    // Remove placeholder on first line
+    if (logPlaceholder && logPlaceholder.parentNode) {
+      logPlaceholder.parentNode.removeChild(logPlaceholder);
+      logPlaceholder = null;
+    }
+
+    var colorClass = getColorClass(line.level, line.message);
+    var div = document.createElement("div");
+    div.className = "log-line " + colorClass;
+    div.setAttribute("data-msg", line.message.toLowerCase());
+
+    var tsSpan = document.createElement("span");
+    tsSpan.className = "log-ts";
+    tsSpan.textContent = formatTime(line.timestamp);
+
+    var msgSpan = document.createElement("span");
+    msgSpan.className = "log-msg";
+    msgSpan.textContent = line.message;
+
+    div.appendChild(tsSpan);
+    div.appendChild(msgSpan);
+
+    // Apply client-side filter visibility
+    if (activeFilter && div.getAttribute("data-msg").indexOf(activeFilter) === -1) {
+      div.style.display = "none";
+    }
+
+    // Insert before resume button
+    if (resumeBtn) {
+      logArea.insertBefore(div, resumeBtn);
+    } else {
+      logArea.appendChild(div);
+    }
+
+    // Enforce max lines
+    var lines = logArea.querySelectorAll(".log-line");
+    while (lines.length > MAX_LOG_LINES) {
+      lines[0].parentNode.removeChild(lines[0]);
+      lines = logArea.querySelectorAll(".log-line");
+    }
+
+    // Auto-scroll
+    if (autoScroll) {
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+  }
+
+  function applyClientFilter() {
+    var lines = logArea.querySelectorAll(".log-line");
+    for (var i = 0; i < lines.length; i++) {
+      var msg = lines[i].getAttribute("data-msg") || "";
+      if (!activeFilter || msg.indexOf(activeFilter) !== -1) {
+        lines[i].style.display = "";
+      } else {
+        lines[i].style.display = "none";
+      }
+    }
+  }
+
+  // Detect user scroll
+  logArea.addEventListener("scroll", function () {
+    var atBottom = logArea.scrollHeight - logArea.scrollTop - logArea.clientHeight < 40;
+    if (atBottom) {
+      autoScroll = true;
+      resumeBtn.style.display = "none";
+    } else {
+      autoScroll = false;
+      resumeBtn.style.display = "block";
+    }
+  });
+
+  window.__resumeAutoScroll = function () {
+    autoScroll = true;
+    resumeBtn.style.display = "none";
+    logArea.scrollTop = logArea.scrollHeight;
+  };
+
+  function setConnectionStatus(connected) {
+    if (connected) {
+      connDot.className = "dot connected";
+      connLabel.textContent = "Connected";
+    } else {
+      connDot.className = "dot disconnected";
+      connLabel.textContent = "Disconnected";
+    }
+  }
+
+  function connectLogStream() {
+    if (eventSource) {
+      eventSource.close();
+    }
+
+    eventSource = new EventSource("/v1/logs");
+
+    eventSource.addEventListener("open", function () {
+      setConnectionStatus(true);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    });
+
+    eventSource.addEventListener("log", function (e) {
+      try {
+        var line = JSON.parse(e.data);
+        appendLogLine(line);
+      } catch (_) { /* ignore malformed */ }
+    });
+
+    eventSource.addEventListener("error", function () {
+      setConnectionStatus(false);
+      eventSource.close();
+      // Auto-reconnect after 3 seconds
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(function () {
+          reconnectTimer = null;
+          connectLogStream();
+        }, 3000);
+      }
+    });
+  }
 
   // ── INIT ──
   fetchInstances();
   refreshTimer = setInterval(fetchInstances, 5000);
+  connectLogStream();
 })();
 </script>
 </body>

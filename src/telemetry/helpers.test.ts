@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as Sentry from "@sentry/node";
 import {
   withSpan,
@@ -8,7 +8,9 @@ import {
   logInfo,
   logWarn,
   logError,
+  subscribeToLogs,
 } from "./helpers.js";
+import type { LogLine } from "./helpers.js";
 
 const mockSetAttribute = vi.fn();
 
@@ -32,8 +34,17 @@ vi.mock("@sentry/node", async () => {
 });
 
 describe("telemetry helpers", () => {
+  let unsubscribes: Array<() => void> = [];
+
   beforeEach(() => {
     vi.clearAllMocks();
+    unsubscribes = [];
+  });
+
+  afterEach(() => {
+    for (const unsub of unsubscribes) {
+      unsub();
+    }
   });
 
   it("withSpan returns the function result", async () => {
@@ -111,5 +122,78 @@ describe("telemetry helpers", () => {
     expect(mockSetAttribute).toHaveBeenCalledWith("metric.value", 150);
     expect(mockSetAttribute).toHaveBeenCalledWith("metric.unit", "ms");
     expect(mockSetAttribute).toHaveBeenCalledWith("metric.tag.route", "/api");
+  });
+
+  it("subscribeToLogs receives log lines from logInfo", () => {
+    const received: LogLine[] = [];
+    const unsub = subscribeToLogs((line) => received.push(line));
+    unsubscribes.push(unsub);
+
+    logInfo("broadcast test", { key: "val" });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].level).toBe("info");
+    expect(received[0].message).toBe("broadcast test");
+    expect(received[0].attributes).toEqual({ key: "val" });
+    expect(typeof received[0].timestamp).toBe("string");
+  });
+
+  it("subscribeToLogs receives log lines from logWarn", () => {
+    const received: LogLine[] = [];
+    const unsub = subscribeToLogs((line) => received.push(line));
+    unsubscribes.push(unsub);
+
+    logWarn("warn broadcast");
+
+    expect(received).toHaveLength(1);
+    expect(received[0].level).toBe("warn");
+    expect(received[0].message).toBe("warn broadcast");
+  });
+
+  it("subscribeToLogs receives log lines from logError", () => {
+    const received: LogLine[] = [];
+    const unsub = subscribeToLogs((line) => received.push(line));
+    unsubscribes.push(unsub);
+
+    logError("error broadcast", { stack: "trace" });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].level).toBe("error");
+    expect(received[0].message).toBe("error broadcast");
+    expect(received[0].attributes).toEqual({ stack: "trace" });
+  });
+
+  it("unsubscribe stops receiving log lines", () => {
+    const received: LogLine[] = [];
+    const unsub = subscribeToLogs((line) => received.push(line));
+
+    logInfo("before unsub");
+    expect(received).toHaveLength(1);
+
+    unsub();
+
+    logInfo("after unsub");
+    expect(received).toHaveLength(1);
+  });
+
+  it("broadcast failures do not break logging", () => {
+    const badSubscriber = vi.fn(() => {
+      throw new Error("subscriber exploded");
+    });
+    const goodReceived: LogLine[] = [];
+    const unsub1 = subscribeToLogs(badSubscriber);
+    const unsub2 = subscribeToLogs((line) => goodReceived.push(line));
+    unsubscribes.push(unsub1, unsub2);
+
+    // Should not throw
+    logInfo("resilient message");
+
+    // Bad subscriber was called but threw
+    expect(badSubscriber).toHaveBeenCalledOnce();
+    // Good subscriber still received the line
+    expect(goodReceived).toHaveLength(1);
+    expect(goodReceived[0].message).toBe("resilient message");
+    // Sentry logger was still called
+    expect(Sentry.logger.info).toHaveBeenCalledWith("resilient message", undefined);
   });
 });

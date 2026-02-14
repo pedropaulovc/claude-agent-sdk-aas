@@ -1,5 +1,33 @@
 import * as Sentry from "@sentry/node";
 
+export type LogLine = {
+  timestamp: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  attributes?: Record<string, unknown>;
+};
+
+type LogSubscriber = (line: LogLine) => void;
+
+const subscribers = new Set<LogSubscriber>();
+
+export function subscribeToLogs(fn: LogSubscriber): () => void {
+  subscribers.add(fn);
+  return () => {
+    subscribers.delete(fn);
+  };
+}
+
+function broadcast(line: LogLine): void {
+  for (const fn of subscribers) {
+    try {
+      fn(line);
+    } catch {
+      /* fail-open */
+    }
+  }
+}
+
 export async function withSpan<T>(
   name: string,
   op: string,
@@ -13,6 +41,7 @@ export function logInfo(
   attributes?: Record<string, unknown>,
 ): void {
   Sentry.logger.info(message, attributes);
+  broadcast({ timestamp: new Date().toISOString(), level: "info", message, attributes });
 }
 
 export function logWarn(
@@ -20,6 +49,7 @@ export function logWarn(
   attributes?: Record<string, unknown>,
 ): void {
   Sentry.logger.warn(message, attributes);
+  broadcast({ timestamp: new Date().toISOString(), level: "warn", message, attributes });
 }
 
 export function logError(
@@ -27,6 +57,7 @@ export function logError(
   attributes?: Record<string, unknown>,
 ): void {
   Sentry.logger.error(message, attributes);
+  broadcast({ timestamp: new Date().toISOString(), level: "error", message, attributes });
 }
 
 export function countMetric(

@@ -3,6 +3,7 @@ import { sentryMiddleware } from "./telemetry/middleware.js";
 import { healthRoutes } from "./routes/health.js";
 import { instanceRoutes } from "./routes/instances.js";
 import { invokeRoutes } from "./routes/invoke.js";
+import { logRoutes } from "./routes/logs.js";
 import { uiRoutes } from "./routes/ui.js";
 
 export const app = new Hono();
@@ -12,3 +13,4 @@ app.route("/", uiRoutes);
 app.route("/", healthRoutes);
 app.route("/", invokeRoutes);
 app.route("/", instanceRoutes);
+app.route("/", logRoutes);
