@@ -46,13 +46,9 @@ Deployed to [Railway](https://railway.app) as a long-lived container. Railway us
 src/
 ├── index.ts              # Entry: init Sentry, start server
 ├── server.ts             # Hono app + route wiring
-├── routes/               # API route handlers
-├── registry/             # Instance store + types
-├── queue/                # Per-instance FIFO queue
-├── sdk/                  # SDK executor, event mapping, OTEL env
-├── telemetry/            # Sentry init, helpers, middleware
-├── ui/                   # Management dashboard (single HTML file)
-└── types/                # Shared types
+├── routes/               # API route handlers (health, instances)
+├── registry/             # Instance store + types (AgentInstance, Zod schemas)
+└── telemetry/            # Sentry init, helpers, middleware
 ```
 
 ## Code Conventions
@@ -72,7 +68,7 @@ src/
 - All routes use Zod for input validation.
 - All routes return JSON (except SSE endpoints and `/ui`).
 - All routes emit Sentry telemetry via middleware.
-- Use `jsonResponse()` / `streamResponse()` helpers that attach trace headers.
+- Use `jsonResponse()` helper that attaches trace headers (`streamResponse()` will be added in S-2.1).
 - Error responses follow the shape: `{ error: string, code?: string }`.
 
 ### Error Handling
@@ -113,10 +109,11 @@ Telemetry is VITAL. **Be liberal — when in doubt, add a span, log, or metric.*
 - `logInfo/logWarn/logError(message, attributes)` — structured logs
 - `countMetric(name, value, attributes)` — counter metrics
 - `distributionMetric(name, value, unit, attributes)` — distribution metrics
+- `chunkedLog(prefix, text, maxLen?)` — split long text into `[chunk N/M]` log entries
 
 ### Traced Responses
 
-All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of raw Hono responses. These helpers automatically attach the active Sentry trace ID as an `x-sentry-trace-id` response header, linking every HTTP response to its full trace in Sentry.
+All API routes MUST use `jsonResponse()` helper instead of raw Hono responses (`streamResponse()` will be added in S-2.1 for SSE endpoints). These helpers automatically attach the active Sentry trace ID as an `x-sentry-trace-id` response header, linking every HTTP response to its full trace in Sentry.
 
 ## Testing
 
@@ -130,7 +127,7 @@ This is a **requirement**:
 
 - **Unit Tests**: Vitest, co-located with source files (`*.test.ts` next to the module).
 - **One `describe()` per file** — each test file contains exactly one top-level `describe()` block.
-- **Factories**: Use `src/tests/factories/` for generating test data. Do not manually construct complex objects in tests.
+- **Test helpers**: Use local factory functions (e.g., `makeRequest()`) co-located in test files. Do not manually construct complex objects inline in tests.
 
 ### Show That Your Tests Are Working
 
