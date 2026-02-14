@@ -29,24 +29,43 @@ double//slash
 has spaces
 ```
 
+## Railway Service Naming
+
+Each instance maps to a Railway service. The service name is derived from the instance name:
+
+```
+aas-w-{sanitized-instance-name}
+```
+
+Sanitization rules:
+- Replace `/` with `-`
+- Lowercase the entire string
+
+Examples:
+
+| Instance Name | Railway Service Name |
+|---------------|---------------------|
+| `michael` | `aas-w-michael` |
+| `dev/A/michael` | `aas-w-dev-a-michael` |
+| `prod/office/michael.scott` | `aas-w-prod-office-michael.scott` |
+
 ## Prefix Operations
 
 | Operation | Behavior | Example |
 |-----------|----------|---------|
 | List by prefix | Returns all instances where name starts with `{prefix}/` OR exact match | `GET ?prefix=dev/A` → `dev/A/michael`, `dev/A/dwight`, etc. |
-| Nuke by prefix | Deletes all matching prefix + exact, cancels active invocations, clears sessions | `DELETE /v1/instances/dev/A` → deletes all `dev/A/*` |
+| Nuke by prefix | Deletes all matching prefix + exact, destroys Railway services | `DELETE /v1/instances/dev/A` → deletes all `dev/A/*` |
 | Get exact | Returns single instance by exact name match | `GET /v1/instances/dev/A/michael` |
 
 ## Nuke Semantics
 
 - DELETE on a path acts as "nuke" if the path matches a prefix (has children)
 - All instances where name starts with `{path}/` are deleted, plus exact match on `{path}` itself
-- Active invocations on nuked instances are cancelled immediately
-- Sessions are cleared (no cleanup needed — in-memory only)
+- **Railway service deletion**: each matching instance's Railway service is deleted via the Railway API (`serviceDelete`). Deletions are fire-and-forget — the control plane does not wait for Railway to confirm.
 - Returns `{ deleted: N }` with count of deleted instances
 - Idempotent: nuking a non-existent prefix returns `{ deleted: 0 }`
 
-**Instant Readiness**: After nuke, the same names can be re-provisioned immediately. No cooldown, no cleanup delay.
+**Instant Readiness**: After nuke, the same names can be re-provisioned immediately. No cooldown, no cleanup delay. Railway service names may briefly conflict if Railway hasn't finished deleting — the provisioner handles this with retry logic.
 
 ## Use Cases
 
@@ -68,3 +87,4 @@ Common operations:
 ## Related
 
 - **Instances**: [instances.md](instances.md) — instance data model, CRUD, lifecycle
+- **Railway Integration**: [railway-integration.md](railway-integration.md) — service naming, provisioning

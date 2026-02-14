@@ -1,16 +1,16 @@
-# Agent Invocation
+# Messaging
 
-Invoke an agent instance to process a prompt. The response is streamed via SSE. Each instance has a FIFO queue allowing one invocation at a time. Sessions persist across invocations for conversation continuity.
+Send messages to agent instances through the control plane. The control plane proxies requests to the worker container, which runs the Claude Agent SDK and streams the response back via SSE.
 
-## Invoke Request
+## Message Request
 
-`POST /v1/instances/{name}/invoke` — invoke an agent instance with a prompt.
+`POST /v1/instances/{name}/message` — send a message to an agent instance.
 
 ### Request Body
 
 ```typescript
 {
-  "prompt": "What do you think about the new project?",
+  "message": "What do you think about the new project?",
   "traceContext": {           // optional, for distributed tracing
     "sentryTrace": "...",
     "baggage": "..."
@@ -20,12 +20,24 @@ Invoke an agent instance to process a prompt. The response is streamed via SSE. 
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `prompt` | string | Yes | Non-empty user message to send to the agent |
+| `message` | string | Yes | Non-empty user message to send to the agent |
 | `traceContext` | object | No | If provided, the invocation trace is linked to the caller's trace |
 | `traceContext.sentryTrace` | string | — | Sentry trace header value |
 | `traceContext.baggage` | string | — | W3C baggage header value |
 
-Returns 400 if `prompt` is missing or empty.
+Returns 400 if `message` is missing or empty.
+
+## Proxy Behavior
+
+The control plane does **not** run the SDK itself. It proxies the request to the worker container:
+
+1. Look up `InstanceRecord` by name
+2. **Guard**: if instance status is not `ready`, return 503 with `{ error: "Instance not ready", status: "{current_status}" }`
+3. Forward `POST /message` to the worker's internal URL (`workerUrl`)
+4. Stream the worker's SSE response directly back to the caller (pass-through)
+5. Attach trace context headers to the proxied request
+
+The control plane adds `sentry-trace` and `baggage` headers to the proxied request for distributed tracing continuity.
 
 ## SSE Response
 
@@ -35,6 +47,7 @@ Response content-type: `text/event-stream`. The connection stays open for the du
 
 | Event | Data | Description |
 |-------|------|-------------|
+| `queued` | `{ position, instanceName }` | Message is queued (worker queue not empty) |
 | `init` | `{ invocationId, instanceName, model, turn: 0 }` | Invocation started |
 | `assistant_text` | `{ text, turn }` | Chunk of assistant text output |
 | `tool_use` | `{ toolName, toolInput, toolUseId, turn }` | Agent is calling a tool |
@@ -46,6 +59,9 @@ Response content-type: `text/event-stream`. The connection stays open for the du
 ### Example SSE Stream
 
 ```
+event: queued
+data: {"position":1,"instanceName":"dev/A/michael"}
+
 event: init
 data: {"invocationId":"abc-123","instanceName":"dev/A/michael","model":"claude-haiku-4-5-20251001","turn":0}
 
@@ -68,82 +84,54 @@ event: done
 data: {"invocationId":"abc-123","turns":1,"costUsd":0.003,"durationMs":2500,"stopReason":"end_turn","sessionId":"sess-789"}
 ```
 
-## Invocation Queue
+## Conversation History
 
-Each instance has a FIFO queue. Only one invocation runs at a time per instance.
+`GET /v1/instances/{name}/history` — retrieve conversation history from the worker.
 
-### Behavior
+The control plane proxies this to the worker's `GET /history` endpoint. Returns the full in-memory conversation history maintained by the worker. See [worker-api.md](worker-api.md) for history format details.
 
-```
-Instance status: ready
-  -> invoke arrives -> status becomes "running", invocation starts immediately
+**Guard**: returns 503 if instance status is not `ready` or `unreachable`.
 
-Instance status: running
-  -> invoke arrives -> queued (FIFO)
-  -> current invocation completes -> next in queue starts automatically
+## Worker Status
 
-Queue full (25 items):
-  -> invoke arrives -> 429 Too Many Requests
-```
+`GET /v1/instances/{name}/status` — retrieve runtime status from the worker.
 
-- New invocations while one is running are queued in FIFO order
-- Queue has a configurable max depth (default: 25)
-- When queue is full, return 429 Too Many Requests with `Retry-After` header
-- Queue depth is visible in instance details (`queueDepth` field)
-- When the active invocation completes, the next queued invocation starts automatically
+The control plane proxies this to the worker's `GET /status` endpoint. Returns session info, invocation counts, uptime, and cost tracking. See [worker-api.md](worker-api.md) for status format details.
+
+**Guard**: returns 503 if instance status is not `ready` or `unreachable`.
 
 ## Session Management
 
-Sessions provide conversation continuity across invocations. The agent remembers prior turns within a session.
+Sessions provide conversation continuity across messages. The agent remembers prior turns within a session. Session management is handled entirely by the worker container.
 
-- First invocation on an instance creates a new SDK session
-- `sessionId` is stored on the instance after invocation completes
-- Subsequent invocations use the SDK `resume` parameter with the stored sessionId
-- PATCH update on an instance resets `sessionId` (forces new session on next invoke)
-- Sessions are in-memory only — lost on process restart
-
-### Session Lifecycle
-
-```
-Instance created -> sessionId: null
-  -> first invoke completes -> sessionId: "sess-123"
-  -> second invoke starts -> resume with "sess-123"
-  -> second invoke completes -> sessionId: "sess-456" (updated)
-  -> PATCH instance -> sessionId: null (reset)
-  -> next invoke -> creates new session
-```
+- Worker creates a new SDK session on first message
+- Subsequent messages use the SDK `resume` parameter with the stored sessionId
+- Config updates (PATCH on control plane) trigger a worker redeploy, which resets the session
+- Sessions are in-memory only — lost on container restart
 
 ## Abort
 
-If the client disconnects (closes the SSE connection), the active invocation is cancelled:
+If the caller disconnects (closes the SSE connection), the control plane closes the proxied connection to the worker. The worker detects this and cancels the active invocation:
 
 1. SDK subprocess is killed
 2. Invocation marked as cancelled
-3. Instance status returns to "ready"
-4. Next queued invocation starts automatically
+3. Next queued message starts automatically
 
-No error event is emitted on client-initiated disconnect.
+Callers can also explicitly abort via `POST /v1/instances/{name}/abort` (not yet implemented — future enhancement).
 
 ## Error Handling
 
 | Error | Response |
 |-------|----------|
 | Instance not found | 404 |
-| Instance in error state | 503 with error details |
-| Queue full | 429 with `Retry-After` header |
-| SDK error during invocation | SSE `error` event, instance status -> "error" |
-| Client disconnect | Invocation cancelled, no error |
-| Invalid/empty prompt | 400 |
-
-### SDK Error Recovery
-
-When an SDK error occurs during invocation:
-1. An SSE `error` event is emitted with the error details and a code
-2. The instance status transitions to "error"
-3. The instance must be explicitly recovered (e.g., via PATCH or delete/recreate) before new invocations can run
-4. Queued invocations receive 503 responses and are discarded
+| Instance not `ready` | 503 with current status |
+| Worker returns error | Proxied error response |
+| Worker unreachable | 503 with `{ error: "Worker unreachable" }` |
+| Invalid/empty message | 400 |
+| Worker queue full | 429 (proxied from worker) |
 
 ## Related
 
 - **Instances**: [instances.md](instances.md) — instance lifecycle and configuration
+- **Worker API**: [worker-api.md](worker-api.md) — worker endpoints, queue, history
 - **Telemetry**: [telemetry.md](telemetry.md) — invocation tracing, logging, and metrics

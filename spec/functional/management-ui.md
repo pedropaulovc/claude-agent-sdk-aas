@@ -17,10 +17,10 @@ A single-file HTML dashboard served at `/ui` for inspecting instance state, view
 |  Tree          |  (Log Stream or Instance Detail)          |
 |                |                                           |
 |  dev/          |  +-- Log Stream -------------------------+|
-|    A/          |  | dev/A/michael | invoke.start | ...    ||
+|    A/          |  | dev/A/michael | message.start | ...   ||
 |      michael   |  | dev/A/michael | assistant.1 | ...     ||
 |      dwight    |  | dev/A/dwight | provision | ...        ||
-|    B/          |  | dev/B/michael | invoke.done | ...     ||
+|    B/          |  | dev/B/michael | message.done | ...    ||
 |      michael   |  |                                       ||
 |                |  |              [Auto-scroll ^]          ||
 |                |  +---------------------------------------+|
@@ -32,7 +32,7 @@ A single-file HTML dashboard served at `/ui` for inspecting instance state, view
 |                |  +---------------------------------------+|
 |                |                                           |
 +----------------+------------------------------------------+
-|  Connected *  | Instances: 16 | Running: 2 | Queued: 1    |
+|  Connected *  | Instances: 16 | Ready: 8 | Deploying: 2   |
 +-----------------------------------------------------------+
 ```
 
@@ -56,10 +56,12 @@ Each leaf node shows:
 
 | Badge | Status | Meaning |
 |-------|--------|---------|
-| Green | `ready` | Instance exists, idle |
-| Blue | `running` | Invocation currently in progress |
-| Yellow | `queued` | Has items waiting in the queue |
-| Red | `error` | Last invocation errored |
+| Gray (pulsing) | `provisioning` | Railway service being created |
+| Blue (pulsing) | `deploying` | Container deploying, waiting for health check |
+| Green | `ready` | Worker is healthy and accepting messages |
+| Orange | `unreachable` | Worker failed health checks (may recover) |
+| Red | `error` | Provisioning failed or fatal error |
+| Gray (fading) | `destroying` | Railway service being deleted |
 
 ### Interactions
 
@@ -86,7 +88,8 @@ Real-time rendering of server log lines, powered by the SSE log endpoint.
 | Event | Color |
 |-------|-------|
 | `provision` | Blue |
-| `invoke.start` | Green |
+| `deploy` | Cyan |
+| `message.start` | Green |
 | `error` | Red |
 | `tool_use` | Yellow |
 | `assistant` | White |
@@ -108,16 +111,32 @@ Displayed when clicking an instance leaf node in the tree. Replaces the log stre
 | Field | Description |
 |-------|-------------|
 | Name | Full instance name (e.g., `dev/A/michael`) |
+| Status | Current status with colored badge |
 | Model | Claude model ID |
 | maxTurns | Turn limit for invocations |
 | maxBudgetUsd | Budget cap per invocation |
-| Status | Current status (`ready`, `running`, `queued`, `error`) |
-| Session ID | Current session ID (if any) |
-| Queue depth | Number of pending items in the instance queue |
+| Worker URL | Internal Railway URL (if available) |
+| Railway Service ID | Railway service identifier |
+| Provision Error | Error message (shown only if status is `error`) |
 | System prompt | First 500 characters, with "Show more" to expand |
 | MCP servers | List of configured MCP server names |
-| Last invoked | Timestamp of last invocation |
-| Invocation count | Total invocations since provisioning |
+| Created at | Timestamp of instance provisioning |
+
+### Worker Runtime Info (fetched from proxy)
+
+When status is `ready`, the detail view fetches `/v1/instances/{name}/status` to display:
+
+| Field | Description |
+|-------|-------------|
+| Session ID | Current SDK session ID |
+| Uptime | Worker container uptime |
+| Message count | Total messages processed |
+| Total cost | Cumulative cost across all messages |
+| Queue depth | Number of pending items in the worker queue |
+
+### View History Button
+
+When status is `ready`, a "View History" button fetches `/v1/instances/{name}/history` and displays the conversation history inline — each message shown with role, content, and timestamp.
 
 ## Actions
 
@@ -125,19 +144,19 @@ Displayed when clicking an instance leaf node in the tree. Replaces the log stre
 
 - **Trigger**: Button in sidebar header or instance detail view
 - **Flow**:
-  1. Opens confirm dialog: "Delete all instances under `{prefix}`? This will cancel active invocations."
+  1. Opens confirm dialog: "Delete all instances under `{prefix}`? This will destroy their Railway services."
   2. On confirm, calls `DELETE /v1/instances/{prefix}`
   3. Shows result toast: "Deleted N instances"
-  4. Tree auto-updates (instances disappear)
+  4. Tree auto-updates (instances transition to `destroying`, then disappear)
 
-### 2. Send Message (Invoke)
+### 2. Send Message
 
 - **Trigger**: "Send Message" panel at bottom of main area (always visible)
 - **Flow**:
-  1. Select instance from dropdown (or click instance in tree to pre-fill)
-  2. Type prompt in text input
+  1. Select instance from dropdown (only shows `ready` instances, or click instance in tree to pre-fill)
+  2. Type message in text input
   3. Click "Send" (or press Enter)
-  4. Calls `POST /v1/instances/{name}/invoke` with the prompt
+  4. Calls `POST /v1/instances/{name}/message` with the message
   5. Response streams inline below the input as SSE events arrive
   6. Shows: assistant text, tool calls, final summary
 
@@ -145,7 +164,7 @@ Displayed when clicking an instance leaf node in the tree. Replaces the log stre
 
 - **Trigger**: Button in top-right header
 - **Flow**:
-  1. Double-confirm dialog: "Delete ALL instances? This cannot be undone."
+  1. Double-confirm dialog: "Delete ALL instances? This will destroy all Railway worker services."
   2. On confirm, calls `DELETE /v1/instances` (or nuke with empty prefix)
   3. Shows result toast: "Deleted N instances"
   4. Tree clears completely
@@ -158,8 +177,8 @@ Persistent bar across the bottom of the dashboard.
 |---------|-------------|
 | Connection indicator | Green dot + "Connected" when SSE stream is active; red dot + "Disconnected" when not |
 | Instance count | Total number of provisioned instances |
-| Running count | Instances currently executing an invocation |
-| Queued count | Instances with pending queue items |
+| Ready count | Instances with `ready` status |
+| Deploying count | Instances with `provisioning` or `deploying` status |
 
 All counts auto-update via SSE events.
 
@@ -176,7 +195,7 @@ Server-side endpoint that streams all log lines as SSE events.
 {
   "timestamp": "2026-02-14T10:30:00.000Z",
   "instanceName": "dev/A/michael",
-  "event": "invoke.start",
+  "event": "message.start",
   "turn": 1,
   "content": "Processing user message..."
 }
@@ -200,6 +219,7 @@ Sends SSE comment (`: keepalive`) every 30 seconds to prevent connection timeout
 
 ## Related
 
-- **Telemetry**: `telemetry.md` — log format and structured logging conventions
-- **Instances**: `instances.md` — instance data model, CRUD operations
-- **Invocation**: `invocation.md` — invoke endpoint, SSE event streaming
+- **Telemetry**: [telemetry.md](telemetry.md) — log format and structured logging conventions
+- **Instances**: [instances.md](instances.md) — instance data model, CRUD operations
+- **Messaging**: [invocation.md](invocation.md) — message endpoint, SSE event streaming
+- **Worker API**: [worker-api.md](worker-api.md) — worker history and status endpoints
