@@ -47,7 +47,7 @@ src/
 ├── index.ts              # Entry: init Sentry, start server
 ├── server.ts             # Hono app + route wiring
 ├── routes/               # API route handlers (health, instances)
-├── registry/             # Instance store + types (AgentInstance, Zod schemas)
+├── registry/             # Instance store + types (InstanceRecord, Zod schemas)
 └── telemetry/            # Sentry init, helpers, middleware
 ```
 
@@ -60,7 +60,7 @@ src/
 - File naming: `kebab-case.ts` for all modules.
 - Prefer early return over nested if/else.
 - Flat over nested — max one level of indentation unless it hurts readability.
-- Use enums/unions over booleans for state (e.g., `status: 'ready' | 'running' | 'error'` not `isRunning: boolean`).
+- Use enums/unions over booleans for state (e.g., `status: 'provisioning' | 'ready' | 'error'` not `isRunning: boolean`).
 - **Keep Codebase Pristine**: This is an unlaunched greenfield project with NO backwards compatibility concerns. Aggressively delete unused code, dead imports, and stale abstractions. Never leave compatibility shims, re-exports, or commented-out code behind.
 
 ### API Routes
