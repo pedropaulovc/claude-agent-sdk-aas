@@ -23,7 +23,7 @@ if (role === "control-plane") {
   const PORT = Number(process.env["PORT"] ?? 8080);
   const MIN_DORMANT = Number(process.env["AAS_MIN_DORMANT"] ?? 10);
   const MONITOR_INTERVAL_MS = Number(process.env["AAS_MONITOR_INTERVAL_MS"] ?? 60_000);
-  const GHCR_IMAGE = process.env["AAS_GHCR_IMAGE"] ?? "ghcr.io/anthropics/aas-worker:latest";
+  const GHCR_IMAGE = process.env["AAS_GHCR_IMAGE"] ?? "ghcr.io/pedropaulovc/aas-worker:latest";
 
   serve({ fetch: app.fetch, port: PORT }, () => {
     logInfo("control-plane started", { port: PORT });
