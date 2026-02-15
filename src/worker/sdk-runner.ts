@@ -17,6 +17,7 @@ import {
   distributionMetric,
   chunkedLog,
 } from "../telemetry/helpers.js";
+import { getOtelEnvVars } from "../telemetry/otel-env.js";
 
 type McpServersRecord = Record<string, { type: "http"; url: string; headers?: Record<string, string> }>;
 
@@ -130,6 +131,16 @@ export class SdkRunner {
 
     if (this.currentSessionId) {
       options["resume"] = this.currentSessionId;
+    }
+
+    // Set OTEL env vars so the SDK subprocess exports spans into this trace
+    const otelVars = getOtelEnvVars(
+      this.config.sentryDsn,
+      Sentry.getActiveSpan(),
+      this.config.instanceName,
+    );
+    for (const [key, value] of Object.entries(otelVars)) {
+      process.env[key] = value;
     }
 
     let q: AsyncGenerator<SDKMessage, void>;
