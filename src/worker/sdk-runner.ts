@@ -14,6 +14,7 @@ import {
   logError,
   countMetric,
   distributionMetric,
+  chunkedLog,
 } from "../telemetry/helpers.js";
 
 type McpServersRecord = Record<string, { type: "http"; url: string; headers?: Record<string, string> }>;
@@ -83,6 +84,8 @@ export class SdkRunner {
       model: this.config.model,
       resumeSession: this.currentSessionId ?? "none",
     });
+    chunkedLog("System prompt", this.config.systemPrompt);
+    chunkedLog("User message", message);
     countMetric("invocation.started", 1, { instanceName: this.config.instanceName });
 
     yield {
@@ -233,12 +236,14 @@ export class SdkRunner {
       for (const block of assistantMsg.message.content) {
         if (block.type === "text") {
           hadContent = true;
+          chunkedLog("Assistant text", block.text);
           yield {
             event: "assistant_text",
             data: { text: block.text, turn },
           };
         } else if (block.type === "tool_use") {
           hadContent = true;
+          logInfo("Tool use", { toolName: block.name, toolUseId: block.id, toolInput: JSON.stringify(block.input) });
           yield {
             event: "tool_use",
             data: {
@@ -248,11 +253,14 @@ export class SdkRunner {
               turn,
             },
           };
+        } else if (block.type === "thinking") {
+          chunkedLog("Reasoning", (block as { type: string; thinking: string }).thinking);
         }
       }
 
       onAssistantEnd(hadContent);
 
+      logInfo("Turn complete", { turn, stopReason: assistantMsg.message.stop_reason ?? "unknown" });
       yield {
         event: "turn_complete",
         data: { turn, stopReason: assistantMsg.message.stop_reason ?? "unknown" },
@@ -269,6 +277,7 @@ export class SdkRunner {
       for (const block of userMsg.message.content) {
         if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
           const toolResultBlock = block as { type: "tool_result"; tool_use_id: string; content: unknown };
+          chunkedLog("Tool result", typeof toolResultBlock.content === 'string' ? toolResultBlock.content : JSON.stringify(toolResultBlock.content));
           yield {
             event: "tool_result",
             data: {
