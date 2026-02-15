@@ -24,9 +24,19 @@ export class RailwayClient {
     this.env = env;
   }
 
-  async serviceCreate(name: string): Promise<{ serviceId: string }> {
+  async serviceCreate(
+    name: string,
+    source?: { image: string },
+  ): Promise<{ serviceId: string }> {
     return withSpan("railway.serviceCreate", "railway.api", async (span) => {
       span.setAttribute("railway.service.name", name);
+      if (source) {
+        span.setAttribute("railway.source.image", source.image);
+      }
+
+      const inputSource = source
+        ? { image: source.image }
+        : { repo: null };
 
       const data = await this.execute<{ serviceCreate: { id: string } }>(
         "serviceCreate",
@@ -37,7 +47,7 @@ export class RailwayClient {
           input: {
             name,
             projectId: this.env.RAILWAY_PROJECT_ID,
-            source: { repo: null },
+            source: inputSource,
           },
         },
       );
@@ -107,6 +117,38 @@ export class RailwayClient {
       const { domain } = data.serviceDomainCreate;
       span.setAttribute("railway.domain", domain);
       return { domain };
+    });
+  }
+
+  async serviceList(): Promise<Array<{ id: string; name: string }>> {
+    return withSpan("railway.serviceList", "railway.api", async (span) => {
+      span.setAttribute("railway.project.id", this.env.RAILWAY_PROJECT_ID);
+
+      type ServiceListResponse = {
+        project: {
+          services: {
+            edges: Array<{ node: { id: string; name: string } }>;
+          };
+        };
+      };
+
+      const data = await this.execute<ServiceListResponse>(
+        "serviceList",
+        `query serviceList($projectId: String!) {
+          project(id: $projectId) {
+            services { edges { node { id name } } }
+          }
+        }`,
+        { projectId: this.env.RAILWAY_PROJECT_ID },
+      );
+
+      const services = data.project.services.edges.map((edge) => ({
+        id: edge.node.id,
+        name: edge.node.name,
+      }));
+
+      span.setAttribute("railway.services.count", services.length);
+      return services;
     });
   }
 
