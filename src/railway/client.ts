@@ -96,6 +96,26 @@ export class RailwayClient {
     });
   }
 
+  async environmentTriggersDeploy(serviceId: string): Promise<void> {
+    return withSpan("railway.environmentTriggersDeploy", "railway.api", async (span) => {
+      span.setAttribute("railway.service.id", serviceId);
+
+      await this.execute<{ environmentTriggersDeploy: boolean }>(
+        "environmentTriggersDeploy",
+        `mutation environmentTriggersDeploy($input: EnvironmentTriggersDeployInput!) {
+          environmentTriggersDeploy(input: $input)
+        }`,
+        {
+          input: {
+            projectId: this.env.RAILWAY_PROJECT_ID,
+            environmentId: this.env.RAILWAY_ENVIRONMENT_ID,
+            serviceId,
+          },
+        },
+      );
+    });
+  }
+
   async serviceDomainCreate(serviceId: string): Promise<{ domain: string }> {
     return withSpan("railway.serviceDomainCreate", "railway.api", async (span) => {
       span.setAttribute("railway.service.id", serviceId);

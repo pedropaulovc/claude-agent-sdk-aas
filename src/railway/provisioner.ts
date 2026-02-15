@@ -105,6 +105,10 @@ export async function provisionInstance(
 
       logInfo(`${record.name} | variables set`);
 
+      await railwayClient.environmentTriggersDeploy(serviceId);
+
+      logInfo(`${record.name} | deploy triggered`);
+
       const { domain } = await railwayClient.serviceDomainCreate(serviceId);
 
       logInfo(`${record.name} | domain created`, { domain });

@@ -62,6 +62,7 @@ function makeRailwayClient(overrides?: Partial<RailwayClient>): RailwayClient {
     serviceCreate: vi.fn().mockResolvedValue({ serviceId: "svc-123" }),
     serviceDelete: vi.fn().mockResolvedValue(undefined),
     variableCollectionUpsert: vi.fn().mockResolvedValue(undefined),
+    environmentTriggersDeploy: vi.fn().mockResolvedValue(undefined),
     serviceDomainCreate: vi.fn().mockResolvedValue({ domain: "my-agent.up.railway.app" }),
     ...overrides,
   } as unknown as RailwayClient;
@@ -119,6 +120,7 @@ describe("provisioner", () => {
       ANTHROPIC_API_KEY: "sk-ant-test",
       SENTRY_DSN: "https://sentry.test/123",
     }));
+    expect(client.environmentTriggersDeploy).toHaveBeenCalledWith("svc-123");
     expect(client.serviceDomainCreate).toHaveBeenCalledWith("svc-123");
 
     expect(record.railwayServiceId).toBe("svc-123");
