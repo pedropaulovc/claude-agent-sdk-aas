@@ -99,7 +99,7 @@ describe("RailwayClient", () => {
     expect(result).toEqual({ serviceId: "svc-abc" });
   });
 
-  it("serviceCreate sends correct GraphQL payload", async () => {
+  it("serviceCreate sends correct GraphQL payload without source", async () => {
     mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
     const client = makeClient();
 
@@ -114,6 +114,20 @@ describe("RailwayClient", () => {
     expect(body.variables.input.name).toBe("my-service");
     expect(body.variables.input.projectId).toBe("proj-123");
     expect(body.variables.input.source).toEqual({ repo: null });
+  });
+
+  it("serviceCreate sends repo source when provided", async () => {
+    mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
+    const client = makeClient();
+
+    await client.serviceCreate("my-service", { repo: "owner/repo", branch: "main" });
+
+    const fetchCall = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(fetchCall[1]?.body as string) as {
+      variables: { input: { source: { repo: string }; branch: string } };
+    };
+    expect(body.variables.input.source).toEqual({ repo: "owner/repo" });
+    expect(body.variables.input.branch).toBe("main");
   });
 
   it("serviceCreate sets span attributes", async () => {

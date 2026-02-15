@@ -60,7 +60,6 @@ function makeStore(): InstanceStore {
 function makeRailwayClient(overrides?: Partial<RailwayClient>): RailwayClient {
   return {
     serviceCreate: vi.fn().mockResolvedValue({ serviceId: "svc-123" }),
-    serviceConnect: vi.fn().mockResolvedValue(undefined),
     serviceDelete: vi.fn().mockResolvedValue(undefined),
     variableCollectionUpsert: vi.fn().mockResolvedValue(undefined),
     serviceDomainCreate: vi.fn().mockResolvedValue({ domain: "my-agent.up.railway.app" }),
@@ -103,7 +102,10 @@ describe("provisioner", () => {
 
     await provisionInstance(record, store, client);
 
-    expect(client.serviceCreate).toHaveBeenCalledWith("aas-w-my-agent");
+    expect(client.serviceCreate).toHaveBeenCalledWith(
+      "aas-w-my-agent",
+      { repo: "pedropaulovc/claude-agent-sdk-aas", branch: "master" },
+    );
     expect(client.variableCollectionUpsert).toHaveBeenCalledWith("svc-123", expect.objectContaining({
       AAS_ROLE: "worker",
       AAS_INSTANCE_NAME: "my-agent",
@@ -115,11 +117,6 @@ describe("provisioner", () => {
       ANTHROPIC_API_KEY: "sk-ant-test",
       SENTRY_DSN: "https://sentry.test/123",
     }));
-    expect(client.serviceConnect).toHaveBeenCalledWith(
-      "svc-123",
-      "pedropaulovc/claude-agent-sdk-aas",
-      "master",
-    );
     expect(client.serviceDomainCreate).toHaveBeenCalledWith("svc-123");
 
     expect(record.railwayServiceId).toBe("svc-123");
@@ -152,7 +149,10 @@ describe("provisioner", () => {
 
     await provisionInstance(record, store, client);
 
-    expect(client.serviceCreate).toHaveBeenCalledWith("aas-w-team-project-agent");
+    expect(client.serviceCreate).toHaveBeenCalledWith(
+      "aas-w-team-project-agent",
+      expect.objectContaining({ repo: "pedropaulovc/claude-agent-sdk-aas" }),
+    );
   });
 
   // --- Name collision retry ---
@@ -222,19 +222,6 @@ describe("provisioner", () => {
     expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
     expect(record.status).toBe("error");
     expect(record.provisionError).toBe("vars failed");
-  });
-
-  it("calls serviceDelete when serviceConnect fails", async () => {
-    const record = makeRecord();
-    const store = makeStore();
-    const serviceConnect = vi.fn().mockRejectedValue(new Error("connect failed"));
-    const client = makeRailwayClient({ serviceConnect } as unknown as Partial<RailwayClient>);
-
-    await provisionInstance(record, store, client);
-
-    expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
-    expect(record.status).toBe("error");
-    expect(record.provisionError).toBe("connect failed");
   });
 
   it("calls serviceDelete when serviceDomainCreate fails", async () => {

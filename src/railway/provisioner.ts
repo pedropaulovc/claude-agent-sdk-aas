@@ -21,10 +21,11 @@ async function createServiceWithRetry(
   railwayClient: RailwayClient,
   serviceName: string,
   instanceName: string,
+  source?: { repo: string; branch?: string },
 ): Promise<{ serviceId: string }> {
   for (let attempt = 1; attempt <= MAX_CREATE_RETRIES; attempt++) {
     try {
-      return await railwayClient.serviceCreate(serviceName);
+      return await railwayClient.serviceCreate(serviceName, source);
     } catch (err: unknown) {
       const isLastAttempt = attempt === MAX_CREATE_RETRIES;
       if (isLastAttempt) {
@@ -84,21 +85,21 @@ export async function provisionInstance(
     logInfo(`${record.name} | provisioning started`, { serviceName });
 
     try {
-      const createResult = await createServiceWithRetry(railwayClient, serviceName, record.name);
+      const repo = process.env.RAILWAY_GIT_REPO ?? "pedropaulovc/claude-agent-sdk-aas";
+      const branch = process.env.RAILWAY_GIT_BRANCH ?? "master";
+
+      const createResult = await createServiceWithRetry(
+        railwayClient, serviceName, record.name,
+        { repo, branch },
+      );
       serviceId = createResult.serviceId;
 
-      logInfo(`${record.name} | service created`, { serviceId });
+      logInfo(`${record.name} | service created`, { serviceId, repo, branch });
 
       const vars = buildVariables(record);
       await railwayClient.variableCollectionUpsert(serviceId, vars);
 
       logInfo(`${record.name} | variables set`);
-
-      const repo = process.env.RAILWAY_GIT_REPO ?? "pedropaulovc/claude-agent-sdk-aas";
-      const branch = process.env.RAILWAY_GIT_BRANCH ?? "master";
-      await railwayClient.serviceConnect(serviceId, repo, branch);
-
-      logInfo(`${record.name} | repo connected`, { repo, branch });
 
       const { domain } = await railwayClient.serviceDomainCreate(serviceId);
 
