@@ -239,68 +239,41 @@ export class WorkerPool {
       const workerServices = services.filter((svc) => workerPattern.test(svc.name));
 
       span.setAttribute("pool.discovered_candidates", workerServices.length);
-      logInfo(`pool.discover: found ${workerServices.length} worker service candidates`, {
+      logInfo(`pool.discover: found ${workerServices.length} orphan worker services — cleaning up`, {
         total: services.length,
         candidates: workerServices.length,
       });
 
+      // Clean up orphan workers from previous CP instances.
+      // We can't reliably determine their URLs or state, so delete them
+      // and let ensurePoolSize create fresh workers with known URLs.
       for (const svc of workerServices) {
         const match = workerPattern.exec(svc.name);
-        if (!match) {
-          continue;
-        }
+        if (!match) continue;
 
         const workerNumber = parseInt(match[1], 10);
-
-        // Update counter to avoid collisions
         if (workerNumber >= this.workerCounter) {
           this.workerCounter = workerNumber;
         }
 
-        // We don't know the domain from serviceList, so we skip health checks
-        // for discovered workers. They'll be created with known URLs in normal flow.
-        // For discovery, we need the domain — attempt to health-check using Railway domain pattern.
-        const workerUrl = `https://${svc.name}.up.railway.app`;
-
         try {
-          const response = await fetch(`${workerUrl}/health`, {
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          });
-
-          const status: WorkerStatus = response.status === 200 ? "dormant" : "error";
-          this.workers.set(workerNumber, {
+          await this.config.railwayClient.serviceDelete(svc.id);
+          logInfo(`pool.discover: deleted orphan worker ${svc.name}`, {
             workerNumber,
             serviceId: svc.id,
-            workerUrl,
-            assignedAgent: null,
-            status,
           });
-
-          logInfo(`pool.discover: worker ${workerNumber} status=${status}`, {
-            workerNumber,
-            serviceId: svc.id,
-            workerUrl,
-          });
-        } catch {
-          this.workers.set(workerNumber, {
-            workerNumber,
-            serviceId: svc.id,
-            workerUrl,
-            assignedAgent: null,
-            status: "error",
-          });
-
-          logInfo(`pool.discover: worker ${workerNumber} unreachable, status=error`, {
-            workerNumber,
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logError(`pool.discover: failed to delete orphan ${svc.name}: ${message}`, {
             serviceId: svc.id,
           });
         }
       }
 
-      span.setAttribute("pool.total_after_discovery", this.workers.size);
-      logInfo("pool.discover: complete", {
-        total: this.workers.size,
-        dormant: this.getDormantCount(),
+      span.setAttribute("pool.orphans_cleaned", workerServices.length);
+      logInfo("pool.discover: cleanup complete", {
+        cleaned: workerServices.length,
+        counterAt: this.workerCounter,
       });
     });
   }

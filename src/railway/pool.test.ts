@@ -385,72 +385,44 @@ describe("WorkerPool", () => {
 
   // --- discoverExistingWorkers ---
 
-  it("discoverExistingWorkers populates pool from serviceList", async () => {
+  it("discoverExistingWorkers deletes orphan worker services", async () => {
+    const serviceDelete = vi.fn().mockResolvedValue(undefined);
     const client = makeRailwayClient({
       serviceList: vi.fn().mockResolvedValue([
         { id: "svc-10", name: "aas-w-10" },
         { id: "svc-20", name: "aas-w-20" },
         { id: "svc-cp", name: "aas-control-plane" },
       ]),
+      serviceDelete,
     });
     const config = makePoolConfig({ railwayClient: client });
     const pool = new WorkerPool(config);
 
     await pool.discoverExistingWorkers();
 
-    const workers = pool.listWorkers();
-    expect(workers).toHaveLength(2);
-
-    const numbers = workers.map((w) => w.workerNumber).sort((a, b) => a - b);
-    expect(numbers).toEqual([10, 20]);
-  });
-
-  it("discoverExistingWorkers marks healthy workers as dormant", async () => {
-    const client = makeRailwayClient({
-      serviceList: vi.fn().mockResolvedValue([
-        { id: "svc-5", name: "aas-w-5" },
-      ]),
-    });
-    // fetch returns 200 (healthy)
-    const config = makePoolConfig({ railwayClient: client });
-    const pool = new WorkerPool(config);
-
-    await pool.discoverExistingWorkers();
-
-    const workers = pool.listWorkers();
-    expect(workers).toHaveLength(1);
-    expect(workers[0].status).toBe("dormant");
-  });
-
-  it("discoverExistingWorkers marks unreachable workers as error", async () => {
-    const client = makeRailwayClient({
-      serviceList: vi.fn().mockResolvedValue([
-        { id: "svc-5", name: "aas-w-5" },
-      ]),
-    });
-    mockUnhealthyFetch();
-    const config = makePoolConfig({ railwayClient: client });
-    const pool = new WorkerPool(config);
-
-    await pool.discoverExistingWorkers();
-
-    const workers = pool.listWorkers();
-    expect(workers).toHaveLength(1);
-    expect(workers[0].status).toBe("error");
+    // Orphan workers deleted, non-workers ignored
+    expect(serviceDelete).toHaveBeenCalledTimes(2);
+    expect(serviceDelete).toHaveBeenCalledWith("svc-10");
+    expect(serviceDelete).toHaveBeenCalledWith("svc-20");
+    // Pool should be empty after cleanup
+    expect(pool.listWorkers()).toHaveLength(0);
   });
 
   it("discoverExistingWorkers ignores non-worker services", async () => {
+    const serviceDelete = vi.fn().mockResolvedValue(undefined);
     const client = makeRailwayClient({
       serviceList: vi.fn().mockResolvedValue([
         { id: "svc-1", name: "aas-control-plane" },
         { id: "svc-2", name: "my-other-service" },
       ]),
+      serviceDelete,
     });
     const config = makePoolConfig({ railwayClient: client });
     const pool = new WorkerPool(config);
 
     await pool.discoverExistingWorkers();
 
+    expect(serviceDelete).not.toHaveBeenCalled();
     expect(pool.listWorkers()).toHaveLength(0);
   });
 
@@ -466,10 +438,25 @@ describe("WorkerPool", () => {
     await pool.discoverExistingWorkers();
 
     // New workers should get numbers > 50
-    await pool.ensurePoolSize(2);
+    await pool.ensurePoolSize(1);
 
     const workers = pool.listWorkers();
-    const newWorkers = workers.filter((w) => w.workerNumber > 50);
-    expect(newWorkers).toHaveLength(1);
+    expect(workers).toHaveLength(1);
+    expect(workers[0].workerNumber).toBe(51);
+  });
+
+  it("discoverExistingWorkers handles delete failure gracefully", async () => {
+    const client = makeRailwayClient({
+      serviceList: vi.fn().mockResolvedValue([
+        { id: "svc-5", name: "aas-w-5" },
+      ]),
+      serviceDelete: vi.fn().mockRejectedValue(new Error("API error")),
+    });
+    const config = makePoolConfig({ railwayClient: client });
+    const pool = new WorkerPool(config);
+
+    // Should not throw
+    await pool.discoverExistingWorkers();
+    expect(pool.listWorkers()).toHaveLength(0);
   });
 });
