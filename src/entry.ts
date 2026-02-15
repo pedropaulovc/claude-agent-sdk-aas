@@ -23,6 +23,20 @@ if (role === "control-plane") {
     console.log(`Control plane started on port ${PORT}`);
   });
 } else {
+  // Claude Code SDK refuses --dangerously-skip-permissions when running as root.
+  // Railway containers run as root by default, so drop to a non-root user.
+  if (process.getuid && process.getuid() === 0) {
+    const { execSync } = await import("child_process");
+    try {
+      execSync("id claude 2>/dev/null || useradd -m claude", { stdio: "pipe" });
+      process.setgid!("claude");
+      process.setuid!("claude");
+      logInfo("worker | dropped root privileges", { uid: process.getuid!() });
+    } catch (err) {
+      console.warn(`Warning: failed to drop root privileges: ${(err as Error).message}`);
+    }
+  }
+
   const { parseWorkerConfig } = await import("./worker/config.js");
   const { initWorkerRoutes } = await import("./worker/routes.js");
   const { workerApp } = await import("./worker/server.js");
