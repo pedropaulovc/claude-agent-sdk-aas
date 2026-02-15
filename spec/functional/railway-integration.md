@@ -1,6 +1,6 @@
 # Railway Integration
 
-The control plane manages worker containers via Railway's GraphQL API. Each instance maps to a Railway service within a shared project and environment. The control plane handles service creation, environment variable injection, domain assignment, health monitoring, and teardown.
+The control plane manages worker containers via Railway's GraphQL API. In M5 pool architecture, Railway is used to provision pool workers (not per-instance workers). Each pool worker is a Railway service within a shared project and environment. The control plane handles service creation, health monitoring, and teardown. Instance-specific config is delivered via HTTP (`POST /configure`), not env vars.
 
 ## Railway GraphQL Client
 
@@ -28,18 +28,45 @@ Located at `src/railway/client.ts`. Wraps Railway's GraphQL API with typed metho
 
 All methods are wrapped in Sentry spans for telemetry. See [telemetry.md](telemetry.md) for Railway API metrics.
 
-## Provisioning Flow
+## Pool Worker Provisioning
 
-Located at `src/railway/provisioner.ts`. Orchestrates the async creation of a worker container.
+Located at `src/pool/replenisher.ts`. Creates Railway services for the worker pool.
 
-### Sequence
+### Pool Worker vs Per-Instance Worker
+
+| | Pool Worker (M5) | Per-Instance Worker (M4 legacy) |
+|---|---|---|
+| **When created** | By pool replenisher to maintain target idle count | On `POST /v1/instances` when pool is empty |
+| **Env vars** | Minimal: `AAS_ROLE=worker`, `ANTHROPIC_API_KEY`, `SENTRY_DSN` | Full: all instance config baked into env vars |
+| **Config delivery** | Via HTTP `POST /configure` | Via env vars at deploy time |
+| **Reusable** | Yes — recycled between instances | No — destroyed on instance delete |
+| **Provisioning speed** | Pre-warmed, instant assignment | 2–5 min (Railway build + deploy) |
+
+### Pool Worker Creation Sequence
+
+```
+1. Pool replenisher detects idle count below target
+2. Call serviceCreate → get serviceId
+3. Call variableCollectionUpsert with minimal env vars:
+     - AAS_ROLE=worker
+     - ANTHROPIC_API_KEY={from control plane env}
+     - SENTRY_DSN={from control plane env}
+4. Call serviceDomainCreate → get workerUrl
+5. Health poll → wait for worker to become healthy
+6. Add worker to pool as idle
+```
+
+### Per-Instance Provisioning (Fallback)
+
+When the pool is empty and a new instance is requested:
 
 ```
 1. Control plane receives POST /v1/instances
-2. Create InstanceRecord with status "provisioning"
-3. Return 202 Accepted to caller
-4. [Background] Call serviceCreate → get serviceId
-5. [Background] Call variableCollectionUpsert with:
+2. Pool has no idle workers → fall back to Railway provisioning
+3. Create InstanceRecord with status "provisioning"
+4. Return 202 Accepted to caller
+5. [Background] Call serviceCreate → get serviceId
+6. [Background] Call variableCollectionUpsert with full instance config:
      - AAS_ROLE=worker
      - AAS_INSTANCE_NAME={name}
      - AAS_SYSTEM_PROMPT={systemPrompt}
@@ -49,9 +76,9 @@ Located at `src/railway/provisioner.ts`. Orchestrates the async creation of a wo
      - AAS_MAX_BUDGET_USD={maxBudgetUsd}
      - ANTHROPIC_API_KEY={from control plane env}
      - SENTRY_DSN={from control plane env}
-6. [Background] Call serviceDomainCreate → get workerUrl
-7. Update InstanceRecord: railwayServiceId, workerUrl, status → "deploying"
-8. Health poller starts monitoring the worker
+7. [Background] Call serviceDomainCreate → get workerUrl
+8. Update InstanceRecord: railwayServiceId, workerUrl, status → "deploying"
+9. Health poller starts monitoring the worker
 ```
 
 ### Error Handling
@@ -62,9 +89,15 @@ If any Railway API call fails during provisioning:
 3. Set InstanceRecord status → `error`, `provisionError` → error message
 4. Emit `provision.count` metric with status=error
 
-### Environment Variable Updates (PATCH)
+### Environment Variable Updates (PATCH) — Pool Workers
 
-When an instance config is updated via PATCH:
+For pool workers, PATCH uses HTTP reconfiguration instead of Railway env var updates:
+
+1. Call `POST /configure` on the worker with updated config (trace context propagated)
+2. Worker applies config in-memory — no Railway redeploy needed
+3. Status remains `ready` (no `deploying` transition)
+
+### Environment Variable Updates (PATCH) — Legacy Workers
 
 1. Call `variableCollectionUpsert` with updated values
 2. Railway automatically redeploys the service when env vars change
@@ -82,7 +115,7 @@ Two polling modes with different intervals:
 | Mode | Interval | Triggered By | Exits When |
 |------|----------|-------------|------------|
 | **Deploy** | 5s | Status transitions to `deploying` | Health check passes OR 120s timeout |
-| **Ongoing** | 30s | Status transitions to `ready` | Instance is deleted |
+| **Ongoing** | 30s | Status transitions to `ready` | Instance is deleted or recycled |
 
 ### Deploy Mode
 
@@ -99,29 +132,40 @@ When an instance is in `ready` status:
 3. After **3 consecutive failures**, transition status → `unreachable`
 4. Continue polling — if health returns, transition status → `ready` (auto-recovery)
 
+### Pool Worker Health Polling
+
+Pool workers (idle) are also health-polled to ensure they remain available:
+1. Poll `GET {workerUrl}/health` every 30 seconds
+2. Check `state` field in response — should be `idle` or `active`
+3. If an idle worker fails 3 consecutive health checks, remove it from pool and terminate the Railway service
+
 ### Health Check Request
 
 ```
 GET {workerUrl}/health
 Timeout: 5000ms
-Expected: 200 { "status": "ok", "instanceName": "..." }
+Expected: 200 { "status": "ok", "instanceName": "...", "state": "idle" | "active" }
 ```
 
 Any non-200 response or timeout counts as a failure.
 
 ## Service Naming
 
-Railway service names are derived from instance names:
+Railway service names are derived from purpose:
 
+**Pool workers:**
 ```
-aas-w-{sanitized-name}
+aas-pool-{index}     (e.g., aas-pool-0, aas-pool-1)
+```
+
+**Per-instance workers (legacy fallback):**
+```
+aas-w-{sanitized-instance-name}
 ```
 
 Where sanitization:
 - Replaces `/` with `-`
 - Lowercases the entire string
-
-See [hierarchy.md](hierarchy.md) for examples.
 
 ### Name Collision on Re-provision
 
@@ -129,6 +173,43 @@ When nuking and immediately re-provisioning, the Railway service may not yet be 
 1. Attempting `serviceCreate` with the computed name
 2. On name conflict error, retry after a 2s delay (max 3 retries)
 3. If retries exhausted, fail with a descriptive error
+
+## Pool Replenishment
+
+Located at `src/pool/replenisher.ts`. Background loop that maintains the worker pool.
+
+### Configuration
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `AAS_POOL_TARGET_IDLE` | `2` | Target number of idle workers |
+| `AAS_POOL_MAX_TOTAL` | `10` | Maximum total workers (idle + active) |
+
+### Replenishment Logic
+
+```
+Every 30 seconds:
+  idle = pool.idleCount()
+  total = pool.totalCount()
+
+  if idle < targetIdle AND total < maxTotal:
+    deficit = min(targetIdle - idle, maxTotal - total)
+    for each deficit:
+      create Railway service (minimal env vars)
+      health poll → once healthy → add to pool as idle
+
+  if idle > targetIdle + 2:  (hysteresis to avoid flapping)
+    excess = idle - targetIdle
+    for each excess:
+      remove oldest idle worker from pool
+      Railway serviceDelete
+```
+
+### Telemetry
+
+- Span: `pool.replenish` wrapping the entire cycle
+- Metrics: `pool.replenish.created`, `pool.replenish.terminated`
+- Logs: created/terminated counts, pool status summary
 
 ## Build Strategy
 
@@ -145,11 +226,18 @@ The `start` script in `package.json` must point to the compiled entry point:
 "start": "node dist/entry.js"
 ```
 
-When creating a worker service, the control plane sets `AAS_ROLE=worker` in the service's environment variables. Railway builds the same codebase from the repo and Railpack produces the container image automatically.
+Pool workers are provisioned with `AAS_ROLE=worker` and no `AAS_INSTANCE_NAME`, causing them to start in idle state.
 
 ## Service Deletion
 
-### Single Instance Delete
+### Pool Worker Recycling (Normal Path)
+
+1. Call `POST /reset` on worker (trace context propagated)
+2. Worker clears state and returns to idle
+3. Release worker back to pool
+4. Remove instance record (but NOT the Railway service — it stays alive for reuse)
+
+### Non-Pool Worker Deletion
 
 1. Set status → `destroying`
 2. Stop health polling for this instance
@@ -159,16 +247,22 @@ When creating a worker service, the control plane sets `AAS_ROLE=worker` in the 
 ### Prefix Nuke
 
 1. Find all matching instances
-2. For each: set status → `destroying`, stop health polling
-3. Call `serviceDelete` for each — fire-and-forget (parallel)
-4. Remove all matching `InstanceRecord`s from registry
-5. Return `{ deleted: N }`
+2. For each:
+   - Pool worker: call `POST /reset`, release to pool
+   - Non-pool worker: set status → `destroying`, call `serviceDelete`
+3. Remove all matching `InstanceRecord`s from registry
+4. Return `{ deleted: N }`
 
-Railway service deletion is fire-and-forget. The control plane does not wait for Railway to confirm deletion. If deletion fails silently, the orphaned service will remain on Railway until manually cleaned up.
+### Pool Worker Termination (by replenisher)
+
+When the pool has excess idle workers:
+1. Remove worker from pool tracking
+2. Call `serviceDelete(railwayServiceId)` — fire-and-forget
+3. Log: `pool.terminate | workerId={id} reason=excess_idle`
 
 ## Related
 
 - **Instances**: [instances.md](instances.md) — instance data model, lifecycle, CRUD
 - **Hierarchy**: [hierarchy.md](hierarchy.md) — service naming convention
-- **Telemetry**: [telemetry.md](telemetry.md) — Railway API call tracing and metrics
-- **Worker API**: [worker-api.md](worker-api.md) — worker health endpoint
+- **Telemetry**: [telemetry.md](telemetry.md) — Railway API call tracing, pool metrics
+- **Worker API**: [worker-api.md](worker-api.md) — worker health endpoint, configure, reset

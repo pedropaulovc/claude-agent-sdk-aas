@@ -47,10 +47,13 @@ Deployed to [Railway](https://railway.app) as a long-lived container. Railway us
 src/
 ├── entry.ts              # Dual-role entry: reads AAS_ROLE, boots control-plane or worker
 ├── server.ts             # Control plane Hono app + route wiring
-├── routes/               # API route handlers (health, instances)
+├── routes/               # API route handlers (health, instances, proxy)
 ├── registry/             # Instance store (InstanceStore class)
+├── railway/              # Railway GraphQL client, provisioner, health poller
+├── pool/                 # Pool manager, replenisher, pool worker types
+├── worker/               # Worker server, SDK runner, queue, history, routes
 ├── shared/               # Shared types (InstanceRecord, McpServerConfig, Zod schemas)
-└── telemetry/            # Sentry init, helpers, middleware
+└── telemetry/            # Sentry init, helpers, middleware, OTEL env var derivation
 ```
 
 ## Code Conventions
@@ -89,6 +92,8 @@ AAS_ROLE=control-plane          # Required: 'control-plane' or 'worker'
 ANTHROPIC_API_KEY=sk-ant-...    # Required
 SENTRY_DSN=https://...          # Required
 RAILWAY_API_TOKEN=...           # Required (for Railway API calls, control-plane only)
+AAS_POOL_TARGET_IDLE=2          # Optional, default 2 (control-plane only)
+AAS_POOL_MAX_TOTAL=10           # Optional, default 10 (control-plane only)
 PORT=8080                       # Optional, default 8080
 ```
 
@@ -103,11 +108,13 @@ PORT=8080                       # Optional, default 8080
 
 Telemetry is VITAL. **Be liberal — when in doubt, add a span, log, or metric.** The cost of too much telemetry is trivial; the cost of too little is hours of blind debugging.
 
+**Distributed tracing with OTel via Sentry is fundamental.** Every HTTP call from control plane to worker carries `sentry-trace` and `baggage` headers. Workers accept incoming trace info and use it as the parent for all operations. The SDK subprocess receives OTEL env vars so its internal spans appear as children of the invocation span. There must be a single unbroken trace from caller → control plane → worker → SDK subprocess.
+
 ### What to Instrument
 
-- **Traces**: Every instance operation (provision, invoke, nuke), every API request, and every significant async operation must be wrapped in a Sentry span. Nest child spans for sub-operations.
-- **Logs**: Structured logs for instance lifecycle events, invocation decisions, SDK events, and errors. Include relevant IDs (instanceName, sessionId, invocationId) as attributes so logs are filterable.
-- **Metrics**: Counters for invocations, queue depth, errors. Distributions for invocation latencies and token usage.
+- **Traces**: Every instance operation (provision, invoke, nuke), every API request, pool operations, and every significant async operation must be wrapped in a Sentry span. Nest child spans for sub-operations.
+- **Logs**: Structured logs for instance lifecycle events, invocation decisions, SDK events, and errors. Include relevant IDs (instanceName, sessionId, invocationId) as attributes so logs are filterable. **Be verbose**: log system prompts, tool call inputs, tool results, reasoning text — full content, chunked if needed. Logs must be sufficient to reconstruct the entire agent conversation from Sentry alone.
+- **Metrics**: Counters for invocations, queue depth, pool state, errors. Distributions for invocation latencies and token usage.
 
 ### Helpers (`src/telemetry/helpers.ts`)
 
@@ -116,6 +123,10 @@ Telemetry is VITAL. **Be liberal — when in doubt, add a span, log, or metric.*
 - `countMetric(name, value, attributes)` — counter metrics
 - `distributionMetric(name, value, unit, attributes)` — distribution metrics
 - `chunkedLog(prefix, text, maxLen?)` — split long text into `[chunk N/M]` log entries
+
+### OTEL Subprocess Tracing (`src/telemetry/otel-env.ts`)
+
+- `getOtelEnvVars(sentryDsn, span, instanceName)` — derive OTEL env vars from Sentry DSN + active span for SDK subprocess trace propagation
 
 ### Traced Responses
 
