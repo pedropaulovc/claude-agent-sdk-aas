@@ -94,6 +94,12 @@ export async function provisionInstance(
 
       logInfo(`${record.name} | variables set`);
 
+      const repo = process.env.RAILWAY_GIT_REPO ?? "pedropaulovc/claude-agent-sdk-aas";
+      const branch = process.env.RAILWAY_GIT_BRANCH ?? "master";
+      await railwayClient.serviceConnect(serviceId, repo, branch);
+
+      logInfo(`${record.name} | repo connected`, { repo, branch });
+
       const { domain } = await railwayClient.serviceDomainCreate(serviceId);
 
       logInfo(`${record.name} | domain created`, { domain });

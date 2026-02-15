@@ -48,6 +48,29 @@ export class RailwayClient {
     });
   }
 
+  async serviceConnect(
+    serviceId: string,
+    repo: string,
+    branch: string,
+  ): Promise<void> {
+    return withSpan("railway.serviceConnect", "railway.api", async (span) => {
+      span.setAttribute("railway.service.id", serviceId);
+      span.setAttribute("railway.repo", repo);
+      span.setAttribute("railway.branch", branch);
+
+      await this.execute<{ serviceConnect: { id: string } }>(
+        "serviceConnect",
+        `mutation serviceConnect($id: String!, $input: ServiceConnectInput!) {
+          serviceConnect(id: $id, input: $input) { id }
+        }`,
+        {
+          id: serviceId,
+          input: { repo, branch },
+        },
+      );
+    });
+  }
+
   async serviceDelete(serviceId: string): Promise<void> {
     return withSpan("railway.serviceDelete", "railway.api", async (span) => {
       span.setAttribute("railway.service.id", serviceId);
