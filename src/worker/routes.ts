@@ -1,50 +1,33 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { createMiddleware } from "hono/factory";
 import { z } from "zod";
 import { jsonResponse, deferSpanEnd } from "../telemetry/middleware.js";
 import { logInfo, countMetric } from "../telemetry/helpers.js";
-import type { WorkerConfig } from "./config.js";
-import { InvocationQueue, QueueFullError } from "./queue.js";
+import type { WorkerState } from "./activation.js";
+import { activate } from "./activation.js";
+import { QueueFullError } from "./queue.js";
 import type { SseEvent } from "./queue.js";
-import { SdkRunner } from "./sdk-runner.js";
-import { HistoryStore, type HistoryMessage } from "./history.js";
+import type { HistoryMessage } from "./history.js";
 
-let workerConfig: WorkerConfig | null = null;
-let invocationQueue: InvocationQueue | null = null;
-let sdkRunner: SdkRunner | null = null;
-let historyStore: HistoryStore | null = null;
-let startedAt: string | null = null;
+let state: WorkerState;
 
 const messageSchema = z.object({
   message: z.string().min(1, "message must be a non-empty string"),
-  traceContext: z.object({
-    sentryTrace: z.string(),
-    baggage: z.string(),
-  }).optional(),
+  traceContext: z
+    .object({
+      sentryTrace: z.string(),
+      baggage: z.string(),
+    })
+    .optional(),
 });
 
-export function initWorkerRoutes(config: WorkerConfig): void {
-  workerConfig = config;
-  const runner = new SdkRunner(config);
-  sdkRunner = runner;
-  invocationQueue = new InvocationQueue(25);
-  invocationQueue.setRunner((message, invocationId, signal) =>
-    runner.run(message, invocationId, signal),
-  );
-  historyStore = new HistoryStore();
-  startedAt = new Date().toISOString();
+export function initWorkerState(s: WorkerState): void {
+  state = s;
 }
 
-export function getInvocationQueue(): InvocationQueue | null {
-  return invocationQueue;
-}
-
-export function getSdkRunner(): SdkRunner | null {
-  return sdkRunner;
-}
-
-export function getHistoryStore(): HistoryStore | null {
-  return historyStore;
+export function getWorkerState(): WorkerState {
+  return state;
 }
 
 /**
@@ -52,11 +35,15 @@ export function getHistoryStore(): HistoryStore | null {
  * then appends the completed assistant message to the history store when done.
  */
 function trackHistory(
-  store: HistoryStore,
   userMessage: string,
   invocationId: string,
   originalOnEvent: (event: SseEvent) => void,
 ): (event: SseEvent) => void {
+  const store = state.historyStore;
+  if (!store) {
+    return originalOnEvent;
+  }
+
   // Record the user message immediately
   store.append({
     role: "user",
@@ -97,54 +84,101 @@ function trackHistory(
   };
 }
 
+// Dormant guard middleware — returns 503 for non-health/activate routes when dormant
+const dormantGuard = createMiddleware(async (c, next) => {
+  if (state.status === "dormant") {
+    return jsonResponse(c, { error: "Worker is dormant", code: "dormant" }, 503);
+  }
+  await next();
+});
+
 export const workerRoutes = new Hono();
 
+// --- Routes available in ALL states ---
+
 workerRoutes.get("/health", (c) => {
+  const base = {
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    uid: process.getuid?.() ?? -1,
+  };
+
+  if (state.status === "dormant") {
+    return jsonResponse(c, { status: "dormant" as const, ...base });
+  }
+
   return jsonResponse(c, {
     status: "ok" as const,
-    instanceName: workerConfig?.instanceName ?? "unknown",
+    instanceName: state.instanceName ?? "unknown",
+    ...base,
   });
 });
 
-workerRoutes.get("/history", (c) => {
-  if (!workerConfig || !historyStore) {
+workerRoutes.post("/activate", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body) {
+    return jsonResponse(c, { error: "Invalid JSON body" }, 400);
+  }
+
+  const result = activate(state, body);
+  if (!result.success) {
+    return jsonResponse(
+      c,
+      { error: result.error, code: result.code },
+      result.status as 400 | 409,
+    );
+  }
+
+  logInfo("POST /activate succeeded", { instanceName: state.instanceName });
+
+  return jsonResponse(c, {
+    activated: true,
+    instanceName: state.instanceName,
+  });
+});
+
+// --- Routes guarded by dormant check ---
+
+workerRoutes.get("/history", dormantGuard, (c) => {
+  if (!state.historyStore) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
   return jsonResponse(c, {
-    instanceName: workerConfig.instanceName,
-    messages: historyStore.getAll(),
+    instanceName: state.instanceName,
+    messages: state.historyStore.getAll(),
   });
 });
 
-workerRoutes.get("/status", (c) => {
-  if (!workerConfig || !sdkRunner || !invocationQueue) {
+workerRoutes.get("/status", dormantGuard, (c) => {
+  if (!state.sdkRunner || !state.invocationQueue) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
-  const uptime = startedAt
-    ? Date.now() - new Date(startedAt).getTime()
+  const uptime = state.startedAt
+    ? Date.now() - new Date(state.startedAt).getTime()
     : 0;
 
   return jsonResponse(c, {
-    instanceName: workerConfig.instanceName,
-    model: workerConfig.model,
-    sessionId: sdkRunner.sessionId,
+    instanceName: state.instanceName,
+    model: state.sdkRunner.config.model,
+    sessionId: state.sdkRunner.sessionId,
     uptime,
-    messageCount: sdkRunner.messageCount,
-    totalCostUsd: sdkRunner.totalCostUsd,
-    queueDepth: invocationQueue.depth,
-    activeInvocationId: invocationQueue.activeInvocationId,
-    startedAt: startedAt ?? new Date().toISOString(),
+    messageCount: state.sdkRunner.messageCount,
+    totalCostUsd: state.sdkRunner.totalCostUsd,
+    queueDepth: state.invocationQueue.depth,
+    activeInvocationId: state.invocationQueue.activeInvocationId,
+    startedAt: state.startedAt,
   });
 });
 
-workerRoutes.post("/abort", (c) => {
-  if (!invocationQueue) {
+workerRoutes.post("/abort", dormantGuard, (c) => {
+  if (!state.invocationQueue) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
-  const result = invocationQueue.abort();
+  const result = state.invocationQueue.abort();
   if (!result.aborted) {
     return jsonResponse(c, { aborted: false, reason: "no_active_invocation" });
   }
@@ -152,37 +186,41 @@ workerRoutes.post("/abort", (c) => {
   return jsonResponse(c, { aborted: true, invocationId: result.invocationId });
 });
 
-workerRoutes.post("/reset", (c) => {
-  if (!workerConfig || !invocationQueue || !sdkRunner || !historyStore) {
+workerRoutes.post("/reset", dormantGuard, (c) => {
+  if (!state.invocationQueue || !state.sdkRunner || !state.historyStore) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
-  if (invocationQueue.activeInvocationId) {
+  if (state.invocationQueue.activeInvocationId) {
     return jsonResponse(
       c,
-      { error: "Cannot reset while invocation is running", code: "invocation_active" },
+      {
+        error: "Cannot reset while invocation is running",
+        code: "invocation_active",
+      },
       409,
     );
   }
 
-  invocationQueue.clear();
-  sdkRunner.resetSession();
-  historyStore.clear();
+  state.invocationQueue.clear();
+  state.sdkRunner.resetSession();
+  state.historyStore.clear();
 
-  logInfo("Worker reset", { instanceName: workerConfig.instanceName });
-  countMetric("worker.reset", 1, { instanceName: workerConfig.instanceName });
+  logInfo("Worker reset", { instanceName: state.instanceName });
+  countMetric("worker.reset", 1, { instanceName: state.instanceName ?? "" });
 
-  return jsonResponse(c, { reset: true, instanceName: workerConfig.instanceName });
+  return jsonResponse(c, {
+    reset: true,
+    instanceName: state.instanceName,
+  });
 });
 
-workerRoutes.post("/message", async (c) => {
-  if (!workerConfig || !invocationQueue || !historyStore) {
+workerRoutes.post("/message", dormantGuard, async (c) => {
+  if (!state.invocationQueue || !state.historyStore) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
-  const currentQueue = invocationQueue;
-  const currentConfig = workerConfig;
-  const currentHistory = historyStore;
+  const currentQueue = state.invocationQueue;
 
   const body = await c.req.json().catch(() => null);
   if (!body) {
@@ -201,17 +239,21 @@ workerRoutes.post("/message", async (c) => {
 
   logInfo("Message received", {
     invocationId,
-    instanceName: currentConfig.instanceName,
+    instanceName: state.instanceName,
     messageLength: parsed.data.message.length,
   });
-  countMetric("message.received", 1, { instanceName: currentConfig.instanceName });
+  countMetric("message.received", 1, {
+    instanceName: state.instanceName ?? "",
+  });
 
   const httpSpan = deferSpanEnd(c);
 
   return streamSSE(c, async (stream) => {
     const abortController = new AbortController();
     let doneResolve: () => void;
-    const donePromise = new Promise<void>((resolve) => { doneResolve = resolve; });
+    const donePromise = new Promise<void>((resolve) => {
+      doneResolve = resolve;
+    });
 
     stream.onAbort(() => {
       logInfo("Client disconnected, aborting invocation", { invocationId });
@@ -232,12 +274,7 @@ workerRoutes.post("/message", async (c) => {
       }
     };
 
-    const onEvent = trackHistory(
-      currentHistory,
-      parsed.data.message,
-      invocationId,
-      sseOnEvent,
-    );
+    const onEvent = trackHistory(parsed.data.message, invocationId, sseOnEvent);
 
     let position: number;
     try {

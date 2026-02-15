@@ -18,8 +18,6 @@ services:
     env_file: .env.local
     environment:
       AAS_ROLE: worker
-      AAS_INSTANCE_NAME: docker-worker-1
-      AAS_SYSTEM_PROMPT: "You are a test agent"
     networks:
       - aas
 
@@ -30,8 +28,6 @@ services:
     env_file: .env.local
     environment:
       AAS_ROLE: worker
-      AAS_INSTANCE_NAME: docker-worker-2
-      AAS_SYSTEM_PROMPT: "You are a test agent"
     networks:
       - aas
 
@@ -42,8 +38,6 @@ services:
     env_file: .env.local
     environment:
       AAS_ROLE: worker
-      AAS_INSTANCE_NAME: docker-worker-3
-      AAS_SYSTEM_PROMPT: "You are a test agent"
     networks:
       - aas
 

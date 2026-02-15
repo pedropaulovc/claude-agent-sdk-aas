@@ -6,22 +6,32 @@ import type {
   SDKResultSuccess,
   SDKResultError,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { WorkerConfig } from "./config.js";
 import type { SseEvent } from "./queue.js";
 import * as Sentry from "@sentry/node";
 import {
-  withSpan,
   logInfo,
   logError,
   countMetric,
   distributionMetric,
   chunkedLog,
 } from "../telemetry/helpers.js";
+
+export type SdkRunnerConfig = {
+  instanceName: string;
+  systemPrompt: string;
+  mcpServers: Array<{ name: string; url: string; headers?: Record<string, string> }>;
+  model: string;
+  maxTurns: number;
+  maxBudgetUsd: number;
+  anthropicApiKey: string;
+  sentryDsn: string;
+  port: number;
+};
 import { getOtelEnvVars } from "../telemetry/otel-env.js";
 
 type McpServersRecord = Record<string, { type: "http"; url: string; headers?: Record<string, string> }>;
 
-function buildMcpServers(config: WorkerConfig): McpServersRecord {
+function buildMcpServers(config: SdkRunnerConfig): McpServersRecord {
   const result: McpServersRecord = {};
   for (const server of config.mcpServers) {
     result[server.name] = {
@@ -34,12 +44,12 @@ function buildMcpServers(config: WorkerConfig): McpServersRecord {
 }
 
 export class SdkRunner {
-  private readonly config: WorkerConfig;
+  readonly config: SdkRunnerConfig;
   private currentSessionId: string | null = null;
   private costAccumulator = 0;
   private messageCounter = 0;
 
-  constructor(config: WorkerConfig) {
+  constructor(config: SdkRunnerConfig) {
     this.config = config;
   }
 

@@ -26,13 +26,12 @@ vi.mock("@sentry/node", async () => {
 });
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { SdkRunner } from "./sdk-runner.js";
-import type { WorkerConfig } from "./config.js";
+import { SdkRunner, type SdkRunnerConfig } from "./sdk-runner.js";
 import type { SseEvent } from "./queue.js";
 
 const mockQuery = vi.mocked(query);
 
-function makeConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+function makeConfig(overrides: Partial<SdkRunnerConfig> = {}): SdkRunnerConfig {
   return {
     instanceName: "test/instance",
     systemPrompt: "You are a test agent.",

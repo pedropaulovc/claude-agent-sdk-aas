@@ -33,6 +33,17 @@ export const updateSchema = z.object({
 });
 export type UpdateRequest = z.infer<typeof updateSchema>;
 
+// Activation request schema (POST /activate on worker)
+export const activationSchema = z.object({
+  instanceName: instanceNameSchema,
+  systemPrompt: z.string().min(1, "systemPrompt is required"),
+  mcpServers: z.array(mcpServerSchema).optional().default([]),
+  model: z.string().optional().default("claude-haiku-4-5-20251001"),
+  maxTurns: z.number().int().positive().optional().default(50),
+  maxBudgetUsd: z.number().positive().optional().default(1.0),
+});
+export type ActivationRequest = z.infer<typeof activationSchema>;
+
 // Instance status
 export type InstanceStatus = "provisioning" | "deploying" | "ready" | "unreachable" | "error" | "destroying";
 
