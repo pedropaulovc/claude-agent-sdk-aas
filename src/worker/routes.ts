@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import { jsonResponse } from "../telemetry/middleware.js";
+import { jsonResponse, deferSpanEnd } from "../telemetry/middleware.js";
 import { logInfo, countMetric } from "../telemetry/helpers.js";
 import type { WorkerConfig } from "./config.js";
 import { InvocationQueue, QueueFullError } from "./queue.js";
@@ -206,6 +206,8 @@ workerRoutes.post("/message", async (c) => {
   });
   countMetric("message.received", 1, { instanceName: currentConfig.instanceName });
 
+  const httpSpan = deferSpanEnd(c);
+
   return streamSSE(c, async (stream) => {
     const abortController = new AbortController();
     let doneResolve: () => void;
@@ -272,5 +274,6 @@ workerRoutes.post("/message", async (c) => {
 
     // Keep the stream open until the invocation completes or client disconnects
     await donePromise;
+    httpSpan?.end();
   });
 });

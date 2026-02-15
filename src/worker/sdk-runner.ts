@@ -8,13 +8,16 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { WorkerConfig } from "./config.js";
 import type { SseEvent } from "./queue.js";
+import * as Sentry from "@sentry/node";
 import {
   withSpan,
   logInfo,
   logError,
   countMetric,
   distributionMetric,
+  chunkedLog,
 } from "../telemetry/helpers.js";
+import { getOtelEnvVars } from "../telemetry/otel-env.js";
 
 type McpServersRecord = Record<string, { type: "http"; url: string; headers?: Record<string, string> }>;
 
@@ -83,6 +86,8 @@ export class SdkRunner {
       model: this.config.model,
       resumeSession: this.currentSessionId ?? "none",
     });
+    chunkedLog("System prompt", this.config.systemPrompt);
+    chunkedLog("User message", message);
     countMetric("invocation.started", 1, { instanceName: this.config.instanceName });
 
     yield {
@@ -128,6 +133,16 @@ export class SdkRunner {
       options["resume"] = this.currentSessionId;
     }
 
+    // Set OTEL env vars so the SDK subprocess exports spans into this trace
+    const otelVars = getOtelEnvVars(
+      this.config.sentryDsn,
+      Sentry.getActiveSpan(),
+      this.config.instanceName,
+    );
+    for (const [key, value] of Object.entries(otelVars)) {
+      process.env[key] = value;
+    }
+
     let q: AsyncGenerator<SDKMessage, void>;
     try {
       q = query({ prompt: message, options });
@@ -144,6 +159,7 @@ export class SdkRunner {
     console.log("[DEBUG sdk-runner] SDK QUERY STARTED", { invocationId });
 
     let lastAssistantHadContent = false;
+    const querySpan = Sentry.startInactiveSpan({ name: "sdk.query", op: "sdk.query" });
 
     try {
       for await (const msg of q) {
@@ -206,7 +222,10 @@ export class SdkRunner {
         }
       }
       console.log("[DEBUG sdk-runner] SDK LOOP DONE", { invocationId });
+      querySpan.end();
     } catch (err) {
+      querySpan.setStatus({ code: 2, message: String(err) });
+      querySpan.end();
       const errorMessage = err instanceof Error ? err.message : String(err);
       console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage });
       logError("SDK invocation threw", { invocationId, error: errorMessage });
@@ -233,12 +252,20 @@ export class SdkRunner {
       for (const block of assistantMsg.message.content) {
         if (block.type === "text") {
           hadContent = true;
+          const textSpan = Sentry.startInactiveSpan({ name: `assistant_text (turn ${turn})`, op: "sdk.event" });
+          chunkedLog("Assistant text", block.text);
+          textSpan.end();
           yield {
             event: "assistant_text",
             data: { text: block.text, turn },
           };
         } else if (block.type === "tool_use") {
           hadContent = true;
+          const toolSpan = Sentry.startInactiveSpan({ name: `tool_use: ${block.name}`, op: "sdk.tool" });
+          toolSpan.setAttribute("tool.name", block.name);
+          toolSpan.setAttribute("tool.id", block.id);
+          logInfo("Tool use", { toolName: block.name, toolUseId: block.id, toolInput: JSON.stringify(block.input) });
+          toolSpan.end();
           yield {
             event: "tool_use",
             data: {
@@ -248,11 +275,16 @@ export class SdkRunner {
               turn,
             },
           };
+        } else if (block.type === "thinking") {
+          const thinkSpan = Sentry.startInactiveSpan({ name: "reasoning", op: "sdk.event" });
+          chunkedLog("Reasoning", (block as { type: string; thinking: string }).thinking);
+          thinkSpan.end();
         }
       }
 
       onAssistantEnd(hadContent);
 
+      logInfo("Turn complete", { turn, stopReason: assistantMsg.message.stop_reason ?? "unknown" });
       yield {
         event: "turn_complete",
         data: { turn, stopReason: assistantMsg.message.stop_reason ?? "unknown" },
@@ -269,6 +301,9 @@ export class SdkRunner {
       for (const block of userMsg.message.content) {
         if (typeof block === "object" && block !== null && "type" in block && block.type === "tool_result") {
           const toolResultBlock = block as { type: "tool_result"; tool_use_id: string; content: unknown };
+          const resultSpan = Sentry.startInactiveSpan({ name: `tool_result: ${toolResultBlock.tool_use_id}`, op: "sdk.tool_result" });
+          chunkedLog("Tool result", typeof toolResultBlock.content === 'string' ? toolResultBlock.content : JSON.stringify(toolResultBlock.content));
+          resultSpan.end();
           yield {
             event: "tool_result",
             data: {
@@ -314,22 +349,23 @@ export class SdkRunner {
   }
 }
 
-// Helper to wrap an async generator in a Sentry span.
-// withSpan expects a Promise, but we need a generator. So we manually
-// start/end the span around the generator's lifecycle.
+// Wrap an async generator in a Sentry span that covers the full iteration
+// lifecycle. startInactiveSpan + manual end() is required because we can't
+// yield from inside a startSpan callback.
 async function* withSpanGenerator(
   name: string,
   op: string,
   fn: () => AsyncGenerator<SseEvent>,
 ): AsyncGenerator<SseEvent> {
-  // We can't use withSpan directly since it returns Promise<T>, not AsyncGenerator.
-  // Instead, we call the function directly and rely on the telemetry
-  // from logInfo/countMetric/distributionMetric within the runner.
+  const span = Sentry.startInactiveSpan({ name, op });
   console.log("[DEBUG sdk-runner] withSpanGenerator ENTER", { name, op });
-  const gen = await withSpan(name, op, async () => {
-    return fn();
-  });
-  console.log("[DEBUG sdk-runner] withSpanGenerator GOT GENERATOR, starting yield*");
-  yield* gen;
-  console.log("[DEBUG sdk-runner] withSpanGenerator yield* COMPLETE");
+  try {
+    yield* fn();
+    console.log("[DEBUG sdk-runner] withSpanGenerator yield* COMPLETE");
+  } catch (err) {
+    span.setStatus({ code: 2, message: String(err) });
+    throw err;
+  } finally {
+    span.end();
+  }
 }

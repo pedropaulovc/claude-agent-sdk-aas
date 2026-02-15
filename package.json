@@ -10,7 +10,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "deploy": "npx @railway/cli@latest up -d"
+    "deploy": "npx @railway/cli@latest up -d",
+    "docker:build": "npm run build && docker compose build",
+    "docker:up": "docker compose up",
+    "docker:down": "docker compose down"
   },
   "dependencies": {
     "hono": "^4",

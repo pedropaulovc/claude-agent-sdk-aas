@@ -1,0 +1,51 @@
+services:
+  cp:
+    build:
+      context: .
+      dockerfile: Dockerfile.cp
+    ports:
+      - "8080:8080"
+    env_file: .env.local
+    environment:
+      AAS_ROLE: control-plane
+    networks:
+      - aas
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env.local
+    environment:
+      AAS_ROLE: worker
+      AAS_INSTANCE_NAME: docker-worker-1
+      AAS_SYSTEM_PROMPT: "You are a test agent"
+    networks:
+      - aas
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env.local
+    environment:
+      AAS_ROLE: worker
+      AAS_INSTANCE_NAME: docker-worker-2
+      AAS_SYSTEM_PROMPT: "You are a test agent"
+    networks:
+      - aas
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env.local
+    environment:
+      AAS_ROLE: worker
+      AAS_INSTANCE_NAME: docker-worker-3
+      AAS_SYSTEM_PROMPT: "You are a test agent"
+    networks:
+      - aas
+
+networks:
+  aas:
