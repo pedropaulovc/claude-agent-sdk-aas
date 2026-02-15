@@ -27,7 +27,6 @@ export class RailwayClient {
   async serviceCreate(
     name: string,
     source?: { repo: string; branch?: string },
-    variables?: Record<string, string>,
   ): Promise<{ serviceId: string }> {
     return withSpan("railway.serviceCreate", "railway.api", async (span) => {
       span.setAttribute("railway.service.name", name);
@@ -42,10 +41,6 @@ export class RailwayClient {
         if (source.branch) {
           input.branch = source.branch;
         }
-      }
-
-      if (variables) {
-        input.variables = variables;
       }
 
       const data = await this.execute<{ serviceCreate: { id: string } }>(

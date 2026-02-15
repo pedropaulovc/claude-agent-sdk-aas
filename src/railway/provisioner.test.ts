@@ -100,23 +100,25 @@ describe("provisioner", () => {
     const store = makeStore();
     const client = makeRailwayClient();
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
     expect(client.serviceCreate).toHaveBeenCalledWith(
       "aas-w-my-agent",
       { repo: "pedropaulovc/claude-agent-sdk-aas", branch: "master" },
-      expect.objectContaining({
-        AAS_ROLE: "worker",
-        AAS_INSTANCE_NAME: "my-agent",
-        AAS_SYSTEM_PROMPT: "You are helpful.",
-        AAS_MCP_SERVERS: "[]",
-        AAS_MODEL: "claude-haiku-4-5-20251001",
-        AAS_MAX_TURNS: "50",
-        AAS_MAX_BUDGET_USD: "1",
-        ANTHROPIC_API_KEY: "sk-ant-test",
-        SENTRY_DSN: "https://sentry.test/123",
-      }),
     );
+    expect(client.variableCollectionUpsert).toHaveBeenCalledWith("svc-123", expect.objectContaining({
+      AAS_ROLE: "worker",
+      AAS_INSTANCE_NAME: "my-agent",
+      AAS_SYSTEM_PROMPT: "You are helpful.",
+      AAS_MCP_SERVERS: "[]",
+      AAS_MODEL: "claude-haiku-4-5-20251001",
+      AAS_MAX_TURNS: "50",
+      AAS_MAX_BUDGET_USD: "1",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      SENTRY_DSN: "https://sentry.test/123",
+    }));
     expect(client.serviceDomainCreate).toHaveBeenCalledWith("svc-123");
 
     expect(record.railwayServiceId).toBe("svc-123");
@@ -133,10 +135,12 @@ describe("provisioner", () => {
     const store = makeStore();
     const client = makeRailwayClient();
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
-    const createCall = vi.mocked(client.serviceCreate).mock.calls[0];
-    const vars = createCall[2] as Record<string, string>;
+    const upsertCall = vi.mocked(client.variableCollectionUpsert).mock.calls[0];
+    const vars = upsertCall[1];
     expect(vars.AAS_MCP_SERVERS).toBe(JSON.stringify(mcpServers));
   });
 
@@ -147,12 +151,13 @@ describe("provisioner", () => {
     const store = makeStore();
     const client = makeRailwayClient();
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
     expect(client.serviceCreate).toHaveBeenCalledWith(
       "aas-w-team-project-agent",
       expect.objectContaining({ repo: "pedropaulovc/claude-agent-sdk-aas" }),
-      expect.any(Object),
     );
   });
 
@@ -170,6 +175,7 @@ describe("provisioner", () => {
     const promise = provisionInstance(record, store, client);
     await vi.advanceTimersByTimeAsync(2000);
     await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
     await promise;
 
     expect(serviceCreate).toHaveBeenCalledTimes(3);
@@ -212,13 +218,30 @@ describe("provisioner", () => {
 
   // --- Cleanup on failure after service created ---
 
+  it("calls serviceDelete when variableCollectionUpsert fails", async () => {
+    const record = makeRecord();
+    const store = makeStore();
+    const variableCollectionUpsert = vi.fn().mockRejectedValue(new Error("vars failed"));
+    const client = makeRailwayClient({ variableCollectionUpsert } as unknown as Partial<RailwayClient>);
+
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
+
+    expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
+    expect(record.status).toBe("error");
+    expect(record.provisionError).toBe("vars failed");
+  });
+
   it("calls serviceDelete when serviceDomainCreate fails", async () => {
     const record = makeRecord();
     const store = makeStore();
     const serviceDomainCreate = vi.fn().mockRejectedValue(new Error("domain failed"));
     const client = makeRailwayClient({ serviceDomainCreate } as unknown as Partial<RailwayClient>);
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
     expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
     expect(record.status).toBe("error");
@@ -235,7 +258,9 @@ describe("provisioner", () => {
       serviceDelete,
     } as unknown as Partial<RailwayClient>);
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
     expect(record.status).toBe("error");
     expect(record.provisionError).toBe("domain failed");
@@ -248,7 +273,9 @@ describe("provisioner", () => {
     const store = makeStore();
     const client = makeRailwayClient();
 
-    await provisionInstance(record, store, client);
+    const promise = provisionInstance(record, store, client);
+    await vi.advanceTimersByTimeAsync(5000);
+    await promise;
 
     const spanCalls = vi.mocked(Sentry.startSpan).mock.calls;
     const provisionMetric = spanCalls.find(

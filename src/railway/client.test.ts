@@ -117,23 +117,18 @@ describe("RailwayClient", () => {
     expect(body.variables.input).not.toHaveProperty("variables");
   });
 
-  it("serviceCreate sends source, branch, and variables when provided", async () => {
+  it("serviceCreate sends source and branch when provided", async () => {
     mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
     const client = makeClient();
 
-    await client.serviceCreate(
-      "my-service",
-      { repo: "owner/repo", branch: "main" },
-      { KEY: "value" },
-    );
+    await client.serviceCreate("my-service", { repo: "owner/repo", branch: "main" });
 
     const fetchCall = vi.mocked(fetch).mock.calls[0];
     const body = JSON.parse(fetchCall[1]?.body as string) as {
-      variables: { input: { source: { repo: string }; branch: string; variables: Record<string, string> } };
+      variables: { input: { source: { repo: string }; branch: string } };
     };
     expect(body.variables.input.source).toEqual({ repo: "owner/repo" });
     expect(body.variables.input.branch).toBe("main");
-    expect(body.variables.input.variables).toEqual({ KEY: "value" });
   });
 
   it("serviceCreate sets span attributes", async () => {
