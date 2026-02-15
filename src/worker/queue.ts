@@ -12,7 +12,7 @@ export type SseEvent =
   | { event: "tool_result"; data: { toolUseId: string; result: unknown; turn: number } }
   | { event: "turn_complete"; data: { turn: number; stopReason: string } }
   | { event: "done"; data: { invocationId: string; turns: number; costUsd: number; durationMs: number; stopReason: string; sessionId: string } }
-  | { event: "error"; data: { invocationId: string; error: string; code?: string } }
+  | { event: "error"; data: { invocationId: string; error: string; code?: string; stderr?: string } }
   | { event: "queued"; data: { invocationId: string; position: number } };
 
 export type QueueItem = {

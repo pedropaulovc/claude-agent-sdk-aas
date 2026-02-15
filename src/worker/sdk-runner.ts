@@ -106,6 +106,9 @@ export class SdkRunner {
 
     const mcpServers = buildMcpServers(this.config);
 
+    // Accumulate stderr to surface in error events
+    const stderrChunks: string[] = [];
+
     const options: Record<string, unknown> = {
       systemPrompt: this.config.systemPrompt,
       model: this.config.model,
@@ -114,7 +117,9 @@ export class SdkRunner {
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
       abortController,
+      debug: true,
       stderr: (data: string) => {
+        stderrChunks.push(data);
         logInfo("SDK stderr", { invocationId, data });
         console.log("[DEBUG sdk-runner] STDERR:", data);
       },
@@ -208,12 +213,13 @@ export class SdkRunner {
       console.log("[DEBUG sdk-runner] SDK LOOP DONE", { invocationId });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage });
-      logError("SDK invocation threw", { invocationId, error: errorMessage });
+      const stderrOutput = stderrChunks.join("");
+      console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage, stderr: stderrOutput });
+      logError("SDK invocation threw", { invocationId, error: errorMessage, stderr: stderrOutput });
       countMetric("invocation.error", 1, { instanceName: this.config.instanceName });
       yield {
         event: "error",
-        data: { invocationId, error: errorMessage, code: "sdk_error" },
+        data: { invocationId, error: errorMessage, code: "sdk_error", stderr: stderrOutput },
       };
     }
   }
