@@ -9,5 +9,7 @@ healthRoutes.get("/v1/health", (c) => {
     status: "ok" as const,
     uptime: process.uptime(),
     instanceCount: store.size,
+    gitBranch: process.env.RAILWAY_GIT_BRANCH ?? null,
+    gitRepo: process.env.RAILWAY_GIT_REPO_NAME ?? null,
   });
 });
