@@ -21,11 +21,10 @@ async function createServiceWithRetry(
   railwayClient: RailwayClient,
   serviceName: string,
   instanceName: string,
-  source?: { repo: string; branch?: string },
 ): Promise<{ serviceId: string }> {
   for (let attempt = 1; attempt <= MAX_CREATE_RETRIES; attempt++) {
     try {
-      return await railwayClient.serviceCreate(serviceName, source);
+      return await railwayClient.serviceCreate(serviceName);
     } catch (err: unknown) {
       const isLastAttempt = attempt === MAX_CREATE_RETRIES;
       if (isLastAttempt) {
@@ -90,16 +89,19 @@ export async function provisionInstance(
 
       const createResult = await createServiceWithRetry(
         railwayClient, serviceName, record.name,
-        { repo, branch },
       );
       serviceId = createResult.serviceId;
 
-      logInfo(`${record.name} | service created`, { serviceId, repo, branch });
+      logInfo(`${record.name} | service created`, { serviceId });
 
       const vars = buildVariables(record);
       await railwayClient.variableCollectionUpsert(serviceId, vars);
 
       logInfo(`${record.name} | variables set`);
+
+      await railwayClient.serviceConnect(serviceId, repo, branch);
+
+      logInfo(`${record.name} | repo connected`, { repo, branch });
 
       const { domain } = await railwayClient.serviceDomainCreate(serviceId);
 

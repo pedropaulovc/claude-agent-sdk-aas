@@ -24,38 +24,49 @@ export class RailwayClient {
     this.env = env;
   }
 
-  async serviceCreate(
-    name: string,
-    source?: { repo: string; branch?: string },
-  ): Promise<{ serviceId: string }> {
+  async serviceCreate(name: string): Promise<{ serviceId: string }> {
     return withSpan("railway.serviceCreate", "railway.api", async (span) => {
       span.setAttribute("railway.service.name", name);
-
-      const sourceInput = source
-        ? { repo: source.repo }
-        : { repo: null };
-
-      const input: Record<string, unknown> = {
-        name,
-        projectId: this.env.RAILWAY_PROJECT_ID,
-        source: sourceInput,
-      };
-
-      if (source?.branch) {
-        input.branch = source.branch;
-      }
 
       const data = await this.execute<{ serviceCreate: { id: string } }>(
         "serviceCreate",
         `mutation serviceCreate($input: ServiceCreateInput!) {
           serviceCreate(input: $input) { id }
         }`,
-        { input },
+        {
+          input: {
+            name,
+            projectId: this.env.RAILWAY_PROJECT_ID,
+          },
+        },
       );
 
       const serviceId = data.serviceCreate.id;
       span.setAttribute("railway.service.id", serviceId);
       return { serviceId };
+    });
+  }
+
+  async serviceConnect(
+    serviceId: string,
+    repo: string,
+    branch: string,
+  ): Promise<void> {
+    return withSpan("railway.serviceConnect", "railway.api", async (span) => {
+      span.setAttribute("railway.service.id", serviceId);
+      span.setAttribute("railway.repo", repo);
+      span.setAttribute("railway.branch", branch);
+
+      await this.execute<{ serviceConnect: { id: string } }>(
+        "serviceConnect",
+        `mutation serviceConnect($id: String!, $input: ServiceConnectInput!) {
+          serviceConnect(id: $id, input: $input) { id }
+        }`,
+        {
+          id: serviceId,
+          input: { repo, branch },
+        },
+      );
     });
   }
 
