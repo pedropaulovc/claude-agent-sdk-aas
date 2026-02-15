@@ -14,13 +14,12 @@ The Office project's agent orchestration runs inline within Vercel serverless fu
 - **Every story must be demoable**: the implementer must show a live demo before claiming completion.
 - **Each story = one pull request**: stories are implemented and merged independently on their own feature branch.
 - **Telemetry is mandatory** (from S-1.1 onward): every story after S-1.1 must include a telemetry validation AC confirming Sentry traces/spans/logs are emitted for key operations.
-- **Distributed tracing is fundamental** (from M5 onward): every HTTP call to a worker must carry `sentry-trace` and `baggage` headers. SDK subprocess must receive OTEL env vars. All SDK events must be logged verbosely.
 
 ## Milestone Overview & Dependency Graph
 
 ```mermaid
 graph TD
-    M1[M1: Foundation & Instance Registry ✅] --> M4[M4: Container-Per-Instance Architecture]
+    M1[M1: Foundation & Instance Registry ✅] --> M4[M4: Container-Per-Instance ✅ S-4.0–4.7]
     M4 --> M5[M5: Pool-Based Worker Architecture]
 ```
 
@@ -29,10 +28,10 @@ graph TD
 | Milestone | Description | Stories | Status | File |
 |-----------|-------------|---------|--------|------|
 | [M1](milestone-1-foundation.md) | Foundation & Instance Registry | S-1.0 through S-1.4 | Complete | `milestone-1-foundation.md` |
-| [M4](milestone-4-containerization.md) | Container-Per-Instance Architecture | S-4.0 through S-4.10 | S-4.0–S-4.7 Complete | `milestone-4-containerization.md` |
-| [M5](milestone-5-pool-architecture.md) | Pool-Based Worker Architecture | S-5.0 through S-5.8 | Planned | `milestone-5-pool-architecture.md` |
+| [M4](milestone-4-containerization.md) | Container-Per-Instance Architecture | S-4.0 through S-4.7 | Complete (S-4.8+ superseded by M5) | `milestone-4-containerization.md` |
+| [M5](milestone-5-pool-architecture.md) | Pool-Based Worker Architecture | S-5.0 through S-5.6 | Planned | `milestone-5-pool-architecture.md` |
 
-> **Note**: M2 (Agent Invocation & Streaming) and M3 (Management UI) were superseded by M4, which implements the same capabilities via container-per-instance architecture instead of in-process SDK execution. M4 stories S-4.8 through S-4.10 are superseded by M5, which rewrites instance lifecycle with pool-aware provisioning.
+> **Note**: M2 (Agent Invocation & Streaming) and M3 (Management UI) were superseded by M4, which implements the same capabilities via container-per-instance architecture instead of in-process SDK execution. M4 stories S-4.8+ (instance lifecycle rewrite, dashboard, E2E) are superseded by M5, which replaces the Railpack build flow with pre-built Docker images and a dormant worker pool.
 
 ## Verification
 
@@ -40,7 +39,6 @@ After each story:
 1. `npm run test` passes
 2. **Live demo** of the story's functionality (mandatory — user must see it working)
 3. Sentry telemetry visible for key operations (from S-1.1 onward)
-4. Distributed trace continuity verified in Sentry (from M5 onward)
 
 ## Risks & Mitigations
 
@@ -51,7 +49,6 @@ After each story:
 | Runaway agent costs | maxBudgetUsd per invocation, maxTurns limit |
 | In-memory state lost on restart | Accepted trade-off; caller reprovisions on startup |
 | Railway API rate limits | Batch operations where possible; retry with backoff |
-| Worker container cold start time | Pool architecture eliminates cold start for pool hits |
-| Railway service name collisions on re-provision | Retry logic with 2s delay, max 3 attempts |
-| Pool exhaustion under burst load | Fall back to Railway provisioning (slow path); replenisher refills pool |
-| SDK subprocess OTEL endpoint derivation from Sentry DSN | Validate DSN parsing, fail-open if invalid |
+| Railway image source API shape unknown | Confirm `serviceCreate` accepts `source: { image }` field; fallback to CLI if needed |
+| Pool cold start on CP restart | Pool monitor creates dormant workers in background; first few provisions may wait |
+| Dormant worker pool exhaustion | Pool monitor replenishes automatically; burst creation if pool empty |

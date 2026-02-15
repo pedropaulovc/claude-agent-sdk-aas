@@ -31,23 +31,15 @@ has spaces
 
 ## Railway Service Naming
 
-Each instance maps to a Railway service. The service name is derived from the instance name:
+Workers are named with a monotonic counter, decoupled from instance names:
 
 ```
-aas-w-{sanitized-instance-name}
+aas-w-{number}
 ```
 
-Sanitization rules:
-- Replace `/` with `-`
-- Lowercase the entire string
+Examples: `aas-w-1`, `aas-w-2`, `aas-w-42`
 
-Examples:
-
-| Instance Name | Railway Service Name |
-|---------------|---------------------|
-| `michael` | `aas-w-michael` |
-| `dev/A/michael` | `aas-w-dev-a-michael` |
-| `prod/office/michael.scott` | `aas-w-prod-office-michael.scott` |
+The mapping from instance name to worker number lives in the `InstanceRecord` (via `workerNumber`) and the pool registry. This avoids name sanitization issues and allows workers to be pre-created before any instance exists.
 
 ## Prefix Operations
 
@@ -61,11 +53,11 @@ Examples:
 
 - DELETE on a path acts as "nuke" if the path matches a prefix (has children)
 - All instances where name starts with `{path}/` are deleted, plus exact match on `{path}` itself
-- **Railway service deletion**: each matching instance's Railway service is deleted via the Railway API (`serviceDelete`). Deletions are fire-and-forget — the control plane does not wait for Railway to confirm.
+- **Worker release**: each matching instance's worker is released via `pool.releaseWorker()`, which destroys the Railway service. Deletions are fire-and-forget. The pool monitor creates replacement dormant workers in the background.
 - Returns `{ deleted: N }` with count of deleted instances
 - Idempotent: nuking a non-existent prefix returns `{ deleted: 0 }`
 
-**Instant Readiness**: After nuke, the same names can be re-provisioned immediately. No cooldown, no cleanup delay. Railway service names may briefly conflict if Railway hasn't finished deleting — the provisioner handles this with retry logic.
+**Instant Readiness**: After nuke, the same names can be re-provisioned immediately from the dormant pool. No cooldown, no cleanup delay.
 
 ## Use Cases
 
@@ -87,4 +79,4 @@ Common operations:
 ## Related
 
 - **Instances**: [instances.md](instances.md) — instance data model, CRUD, lifecycle
-- **Railway Integration**: [railway-integration.md](railway-integration.md) — service naming, provisioning
+- **Railway Integration**: [railway-integration.md](railway-integration.md) — pool management, worker creation

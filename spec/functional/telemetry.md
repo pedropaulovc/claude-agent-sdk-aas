@@ -22,13 +22,13 @@ Sentry.init({
   }
 });
 
-// Worker (dynamic — updates when assigned to an instance)
+// Worker (dormant — serverName updated on activation)
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   tracesSampleRate: 1.0,
   enableLogs: true,
   environment: 'production',
-  serverName: `aas-worker-idle`,  // becomes `aas-worker-{instanceName}` on configure
+  serverName: 'aas-worker-dormant',  // becomes `aas-worker-{instanceName}` on activation
   beforeSendSpan: (span) => {
     console.log(`[sentry] ${span.op} | ${span.description} | ${(span.timestamp - span.start_timestamp) * 1000}ms | trace=${span.trace_id}`);
     return span;
@@ -89,8 +89,9 @@ All console log lines follow a structured format for grep-ability and management
 ### Examples
 
 ```
-dev/A/michael | configure | prompt.len=2500 mcpServers=1 model=claude-haiku-4-5
-dev/A/michael | pool.assign | workerId=w-abc123 poolHit=true
+dev/A/michael | provision | prompt.len=2500 mcpServers=1 model=claude-haiku-4-5
+dev/A/michael | provision.claim | workerNumber=42
+dev/A/michael | provision.activate | workerUrl=https://aas-w-42.up.railway.app
 dev/A/michael | message.start | invocationId=abc prompt.len=150
 dev/A/michael | prompt | [chunk 1/3] You are Michael Scott...
 dev/A/michael | user.1 | What do you think about the new project?
@@ -100,7 +101,6 @@ dev/A/michael | tool_result.1 | send_message -> {"messageId":"uuid"}
 dev/A/michael | reasoning.1 | [chunk 1/2] I should consider...
 dev/A/michael | assistant.2 | I've sent the message.
 dev/A/michael | message.done | status=completed turns=2 cost=$0.003 duration=2500ms
-dev/A/michael | recycle | workerId=w-abc123 returning to pool
 ```
 
 ### Text Chunking
@@ -147,7 +147,7 @@ The full trace spans from caller through control plane to worker to SDK subproce
 ```
 Caller Span (external)
   └── Control Plane: HTTP Request (server span)
-        └── Control Plane: Proxy / Configure / Reset (child span)
+        └── Control Plane: Proxy Request (child span)
               └── Worker: HTTP Request (server span, continued trace)
                     └── Worker: Invocation (parent span)
                          ├── [SDK subprocess spans via OTEL]
@@ -166,7 +166,7 @@ On the control plane's message endpoint specifically, the request body's `traceC
 
 ### 2. Trace Propagation on ALL Worker HTTP Calls (Control Plane → Worker)
 
-When the control plane makes **any** HTTP call to a worker (`/configure`, `/reset`, `/message`, `/history`, `/status`, `/health`), it MUST attach `sentry-trace` and `baggage` headers derived from the active span:
+When the control plane makes **any** HTTP call to a worker (`/activate`, `/message`, `/history`, `/status`, `/health`), it MUST attach `sentry-trace` and `baggage` headers derived from the active span:
 
 ```typescript
 const traceHeaders = getTraceHeaders(); // from active Sentry span
@@ -203,22 +203,6 @@ Control Plane: Provision Instance
   └── Railway: serviceDomainCreate
 ```
 
-### 6. Pool Operations Tracing (Control Plane)
-
-All pool operations are wrapped in Sentry spans:
-
-```
-Control Plane: Pool Acquire
-  └── HTTP: POST /configure on worker (trace propagated)
-
-Control Plane: Pool Release
-  └── HTTP: POST /reset on worker (trace propagated)
-
-Control Plane: Pool Replenish
-  ├── Railway: serviceCreate (for each new pool worker)
-  └── Health Poll: wait for healthy
-```
-
 ## HTTP Middleware
 
 Every incoming HTTP request is instrumented (both roles):
@@ -238,25 +222,23 @@ All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of
 |--------|------|------|-------------|
 | `instance.count` | Gauge | — | Current number of instances |
 | `provision.count` | Counter | status | Provision attempts (success/error) |
-| `provision.pool_hit` | Counter | — | Provisions served from pool |
-| `provision.pool_miss` | Counter | — | Provisions requiring Railway service creation |
-| `provision.duration_ms` | Distribution | source (pool/railway) | Time from provision request to ready |
+| `provision.duration_ms` | Distribution | — | Time from provision request to ready (includes activation) |
 | `proxy.count` | Counter | instance, route | Proxied requests |
 | `proxy.duration_ms` | Distribution | instance, route | Proxy latency |
 | `proxy.error` | Counter | instance, error_type | Proxy errors |
 | `nuke.count` | Counter | prefix | Nuke operations |
 | `nuke.deleted` | Distribution | prefix | Instances deleted per nuke |
-| `recycle.count` | Counter | — | Workers recycled back to pool |
-| `recycle.duration_ms` | Distribution | — | Time to recycle a worker |
 | `health_poll.count` | Counter | instance, result | Health check results |
 | `health_poll.latency_ms` | Distribution | instance | Health check latency |
 | `railway_api.count` | Counter | operation, status | Railway API calls |
 | `railway_api.duration_ms` | Distribution | operation | Railway API latency |
-| `pool.idle` | Gauge | — | Current idle workers in pool |
-| `pool.active` | Gauge | — | Current active workers in pool |
-| `pool.total` | Gauge | — | Total workers in pool |
-| `pool.replenish.created` | Counter | — | Workers created by replenisher |
-| `pool.replenish.terminated` | Counter | — | Workers terminated by replenisher |
+| `pool.dormant_count` | Gauge | — | Current dormant workers in pool |
+| `pool.active_count` | Gauge | — | Current active workers in pool |
+| `pool.create_batch` | Counter | — | Pool scale-up batches triggered |
+| `pool.claim` | Counter | status | Worker claims (success/empty) |
+| `pool.release` | Counter | — | Worker releases (destroy) |
+| `activation.count` | Counter | status | Worker activations (success/error) |
+| `activation.duration_ms` | Distribution | — | Time from claim to active |
 
 ### Worker Metrics
 
@@ -268,9 +250,6 @@ All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of
 | `message.cost_usd` | Distribution | model | Cost per message |
 | `message.turns` | Distribution | model | Turns per message |
 | `queue.depth` | Gauge | — | Current queue depth |
-| `configure.count` | Counter | — | Configure requests received |
-| `configure.duration_ms` | Distribution | — | Time to apply configuration |
-| `reset.count` | Counter | — | Reset requests received |
 
 ## Instrumentation Matrix
 
@@ -278,24 +257,22 @@ All API routes MUST use `jsonResponse()` / `streamResponse()` helpers instead of
 
 | Operation | Span | Log | Metric |
 |-----------|------|-----|--------|
-| Instance provision (pool hit) | Yes | Yes (config summary, worker ID) | `provision.pool_hit`, `provision.duration_ms` |
-| Instance provision (pool miss) | Yes | Yes (config summary) | `provision.pool_miss`, `provision.duration_ms` |
+| Instance provision | Yes | Yes (config summary, worker number) | `instance.count`, `provision.count` |
 | Instance delete/nuke | Yes | Yes (deleted count) | `nuke.count`, `nuke.deleted` |
-| Instance recycle | Yes | Yes (worker ID) | `recycle.count`, `recycle.duration_ms` |
-| Pool acquire | Yes | Yes (worker ID, instance) | `pool.idle`, `pool.active` |
-| Pool release | Yes | Yes (worker ID, instance) | `pool.idle`, `pool.active` |
-| Pool replenish | Yes | Yes (created/terminated count) | `pool.replenish.created`, `pool.replenish.terminated` |
 | Railway API call | Yes | Yes (operation, response) | `railway_api.count`, `railway_api.duration_ms` |
 | Health poll | Yes | Yes (instance, result) | `health_poll.count`, `health_poll.latency_ms` |
 | Proxy request | Yes | Yes (instance, route) | `proxy.count`, `proxy.duration_ms` |
+| Pool scale-up | Yes | Yes (batch size, dormant count) | `pool.create_batch`, `pool.dormant_count` |
+| Worker claim | Yes | Yes (worker number) | `pool.claim` |
+| Worker release | Yes | Yes (worker number) | `pool.release` |
+| Worker activation | Yes | Yes (instance name, worker) | `activation.count`, `activation.duration_ms` |
 | HTTP request | Yes | Yes (method, path, status) | — |
 
 ### Worker
 
 | Operation | Span | Log | Metric |
 |-----------|------|-----|--------|
-| Configure | Yes | Yes (config summary, system prompt chunked) | `configure.count`, `configure.duration_ms` |
-| Reset | Yes | Yes (instance name) | `reset.count` |
+| Activation | Yes | Yes (instance name, config summary, system prompt chunked) | `activation.count`, `activation.duration_ms` |
 | Message start | Yes (parent) | Yes (invocationId, prompt.len) | `message.count` |
 | System prompt | — | Yes (full text, chunked) | — |
 | User message | — | Yes (full text) | — |

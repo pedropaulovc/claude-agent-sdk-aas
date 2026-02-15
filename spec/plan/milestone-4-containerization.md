@@ -1,22 +1,20 @@
 # Milestone 4: Container-Per-Instance Architecture
 
-**Goal**: Replace in-process SDK execution with one container per instance (built by Railpack). The current AAS becomes a control plane that provisions and manages worker containers via Railway's API.
+**Goal**: Replace in-process SDK execution with one container per instance. The current AAS becomes a control plane that provisions and manages worker containers via Railway's API. Workers run the SDK, expose their own HTTP API, and are managed by the control plane.
 
 **Dependency**: M3 (Management UI) must be complete before starting M4.
 
+**Status**: Stories S-4.0 through S-4.7 are complete. Remaining work (instance lifecycle rewrite, deployment, E2E) is superseded by **[M5: Pool-Based Worker Architecture](milestone-5-pool-architecture.md)**, which replaces the per-agent Railpack build flow with pre-built Docker images and a dormant worker pool.
+
 ```mermaid
 graph TD
-    S40[S-4.0 Shared types & entry point] --> S41[S-4.1 Railway GraphQL client]
-    S40 --> S42[S-4.2 Worker scaffold]
-    S41 --> S45[S-4.5 Async provisioner]
-    S42 --> S43[S-4.3 Worker SDK integration]
-    S43 --> S44[S-4.4 Worker history & status]
-    S45 --> S46[S-4.6 Health poller]
-    S46 --> S47[S-4.7 Proxy routes]
-    S44 --> S47
-    S47 --> S48[S-4.8 Instance lifecycle rewrite]
-    S48 --> S49[S-4.9 Dashboard updates]
-    S49 --> S410[S-4.10 E2E integration]
+    S40[S-4.0 Shared types & entry point ✅] --> S41[S-4.1 Railway GraphQL client ✅]
+    S40 --> S42[S-4.2 Worker scaffold ✅]
+    S41 --> S45[S-4.5 Async provisioner ✅]
+    S42 --> S43[S-4.3 Worker SDK integration ✅]
+    S43 --> S44[S-4.4 Worker history & status ✅]
+    S45 --> S46[S-4.6 Health poller ✅]
+    S46 --> S47[S-4.7 Proxy routes ✅]
 ```
 
 ---
@@ -241,78 +239,6 @@ Create `src/routes/proxy.ts` with routes that forward requests to workers. SSE s
 
 ---
 
-## [S-4.8] Instance Lifecycle Rewrite
+## Superseded Stories
 
-As a developer, I want the control plane's instance CRUD to use the new async provisioning and expanded status flow.
-
-### Description
-
-Rewrite `src/routes/instances.ts` and `src/registry/store.ts` to use `InstanceRecord` with the new status union. POST returns 202, PATCH triggers redeploy, DELETE triggers Railway service deletion.
-
-### Files to modify
-
-| File | Purpose |
-|------|---------|
-| `src/routes/instances.ts` | Updated CRUD routes |
-| `src/registry/store.ts` | Updated store with `InstanceRecord` |
-| `src/routes/instances.test.ts` | Updated tests |
-| `src/registry/store.test.ts` | Updated tests |
-
-### Acceptance Criteria
-
-- [ ] POST returns 202, kicks off async provisioning, status starts as `provisioning`
-- [ ] PATCH updates env vars on Railway, status → `deploying`
-- [ ] PATCH blocked while `provisioning` or `destroying` → 409
-- [ ] DELETE transitions to `destroying`, calls Railway `serviceDelete`
-- [ ] GET returns `InstanceRecord` with new fields
-- [ ] List returns all instances with expanded status info
-- [ ] Old `AgentInstance` type fully removed
-- [ ] Old `invoke` route removed (replaced by proxy `/message`)
-
----
-
-## [S-4.9] Dashboard Updates
-
-As a developer, I want the management dashboard to reflect the new container architecture.
-
-### Description
-
-Update `src/ui/dashboard.html` with new status badges, worker info in instance detail, history viewer, and proxy-based messaging.
-
-### Files to modify
-
-| File | Purpose |
-|------|---------|
-| `src/ui/dashboard.html` | Updated dashboard |
-
-### Acceptance Criteria
-
-- [ ] Status badges: gray-pulsing (provisioning), blue-pulsing (deploying), green (ready), orange (unreachable), red (error), gray-fading (destroying)
-- [ ] Instance detail shows: worker URL, Railway service ID, provision error
-- [ ] "View History" button fetches and displays conversation history
-- [ ] Worker runtime info (session, uptime, cost, queue) displayed when ready
-- [ ] Send Message uses `POST /v1/instances/{name}/message`
-- [ ] Status bar shows Ready and Deploying counts
-- [ ] Instance dropdown for Send Message only shows `ready` instances
-
----
-
-## [S-4.10] E2E Integration
-
-As a developer, I want to verify the full flow works end-to-end: provision → deploy → health → message → history.
-
-### Description
-
-Integration test that exercises the full lifecycle against real (or mocked) Railway services. Verify trace continuity from control plane through worker.
-
-### Acceptance Criteria
-
-- [ ] Provision an instance → status transitions: `provisioning` → `deploying` → `ready`
-- [ ] Send a message → SSE stream received with expected events
-- [ ] Fetch history → conversation visible
-- [ ] Fetch status → runtime info correct
-- [ ] PATCH instance → status transitions to `deploying`, then back to `ready`
-- [ ] Delete instance → status transitions to `destroying`, then removed
-- [ ] Nuke prefix → all matching instances deleted
-- [ ] Sentry traces span from control plane through worker
-- [ ] All metrics emitted correctly
+S-4.8 (Instance Lifecycle Rewrite), S-4.9 (Dashboard Updates), and S-4.10 (E2E Integration) are **superseded by [M5: Pool-Based Worker Architecture](milestone-5-pool-architecture.md)**. M5 replaces the Railpack-based provisioning flow with pre-built Docker images and a dormant worker pool, making these stories obsolete as written.
