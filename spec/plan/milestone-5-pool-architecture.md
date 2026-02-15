@@ -1,535 +1,376 @@
 # Milestone 5: Pool-Based Worker Architecture
 
-**Goal**: Replace per-instance Railway service provisioning with a pre-warmed worker pool. Workers are provisioned once, configured dynamically via HTTP, and recycled between instances. Distributed tracing with OTel via Sentry is fundamental — every operation must carry trace context end-to-end.
+**Goal**: Replace the per-agent Railpack build flow with pre-built Docker images (GHCR) and a pool of dormant worker services. Agent creation goes from minutes (Railpack rebuild) to seconds (HTTP activation of a pre-provisioned worker).
 
-**Dependency**: M4 stories S-4.0 through S-4.7 must be complete.
+**Dependency**: M4 stories S-4.0 through S-4.7 must be merged before starting M5.
 
-**Key Insight**: In M4, provisioning an instance means creating a Railway service (2–5 min cold start). In M5, provisioning means assigning an already-running idle worker from a pool and sending it configuration via HTTP (< 1 second). Workers that are released go back to idle and re-enter the pool.
+**Problems solved**:
+1. **Railpack rebuilds**: Every new agent triggered a full container build (~2-3 min). No Dockerfile meant no control over caching.
+2. **Single image, dual role**: One codebase with `AAS_ROLE` env var switch. Every worker service rebuilt the same code from scratch.
+3. **Slow debugging**: No local Docker environment; all debugging happened on Railway.
 
 ```mermaid
 graph TD
-    S50[S-5.0 Worker dynamic config] --> S51[S-5.1 Pool manager]
-    S50 --> S52[S-5.2 SDK subprocess OTEL tracing]
-    S50 --> S53[S-5.3 Verbose SDK event logging]
-    S51 --> S54[S-5.4 Pool-aware provisioning]
-    S54 --> S55[S-5.5 Pool-aware deletion & recycling]
-    S55 --> S56[S-5.6 Pool replenishment]
-    S52 --> S57[S-5.7 Instance lifecycle rewrite]
-    S53 --> S57
-    S56 --> S57
-    S57 --> S58[S-5.8 E2E pool lifecycle test]
+    S50[S-5.0 Dockerfiles + local Docker] --> S51[S-5.1 Worker dormant state + activation]
+    S51 --> S52[S-5.2 Local Docker E2E verification]
+    S50 --> S53[S-5.3 Pool manager + GHCR service creation]
+    S52 --> S54[S-5.4 Pool-based provisioning + lifecycle rewrite]
+    S53 --> S54
+    S54 --> S55[S-5.5 Spec + doc rewrite]
+    S54 --> S56[S-5.6 Railway deployment + E2E verification]
 ```
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-Control Plane
-├── Instance Registry (in-memory Map<name, InstanceRecord>)
-├── Pool Manager (tracks idle/active workers)
-│    ├── idle: Worker[] (provisioned, no config, waiting for assignment)
-│    └── active: Map<instanceName, Worker> (configured, serving an instance)
-├── Pool Replenisher (background loop, maintains target idle count)
-├── Railway Client (for creating/deleting pool workers)
-└── Health Poller (monitors all workers)
+Build Pipeline:
+  docker build -f Dockerfile.cp → ghcr.io/.../aas-cp:latest → push
+  docker build -f Dockerfile.worker → ghcr.io/.../aas-worker:latest → push
 
-Worker Container (Railway)
-├── State Machine: idle → configuring → active → resetting → idle
-├── POST /configure — accept instance config via HTTP
-├── POST /message — process messages (only when active)
-├── POST /reset — clear state, return to idle
-├── GET /health — reflects current state (idle/active)
-└── SDK Runner (with OTEL subprocess tracing)
+Railway:
+  CP service (1x, pulls aas-cp image)
+    ├── Instance Registry (in-memory)
+    ├── Worker Pool Manager (creates/monitors worker services)
+    └── Proxy routes → worker /message, /history, /status
+
+  Worker services (N x, each pulls aas-worker image)
+    ├── Starts DORMANT (HTTP server up, no SDK)
+    ├── POST /activate → receives agent config → initializes SDK → ACTIVE
+    └── POST /message, GET /history, GET /status, etc.
+
+Provisioning Flow:
+  POST /v1/instances → pick dormant worker → POST /activate → ready (seconds)
+
+Pool Scaling:
+  Background monitor: dormant_count < 10 → create 10 more worker services
 ```
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Image delivery | GHCR (pre-built) | No Railway builds. Pool scaling is instant — just pull image |
+| Worker on agent delete | Destroy + replace | Clean state, pool monitor creates replacements |
+| Worker addressing | Separate Railway services | Each worker gets its own URL for direct addressing |
+| Activation mechanism | `POST /activate` on worker | Fast, no rebuild, config via HTTP body not env vars |
+| Worker naming | `aas-w-{monotonic-number}` | Simple, predictable, no name collisions |
+
+---
+
+## [S-5.0] Dockerfiles + Local Docker Environment
+
+As a developer, I want Dockerfiles and a docker-compose for local development and testing so I can build, run, and debug the full stack locally.
+
+### Description
+
+Create two Dockerfiles (control plane and worker) and a docker-compose for local development. The control plane image is minimal Node.js. The worker image includes system dependencies required by the SDK (git, curl) and runs as an unprivileged `claude` user.
+
+### Files to create
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile.cp` | Node 22 slim, `npm ci --omit=dev`, copies `dist/`, `ENV AAS_ROLE=control-plane`, runs `node dist/entry.js` |
+| `Dockerfile.worker` | Node 22 slim, installs system deps (git, curl), creates `claude` user, copies `dist/`, `ENV AAS_ROLE=worker`, runs `node dist/entry.js` |
+| `.dockerignore` | node_modules, .git, dist (built in Docker), etc. |
+| `docker-compose.yml` | 1 CP + 3 workers (dormant), shared network, env vars for secrets |
+
+### Files to modify
+
+| File | Purpose |
+|------|---------|
+| `package.json` | Add `docker:build`, `docker:up`, `docker:down` scripts |
+
+### Acceptance Criteria
+
+- [ ] `npm run build && docker compose build` produces two distinct images
+- [ ] `docker compose up` starts CP + 3 workers
+- [ ] CP health endpoint responds
+- [ ] Worker health endpoints respond (with dormant status, after S-5.1)
+
+---
+
+## [S-5.1] Worker Dormant State + Activation Endpoint
+
+As a developer, I want workers to start in dormant mode and be activated via HTTP so that agent configuration is delivered at activation time, not at boot.
+
+### Description
+
+Workers boot with only secrets (ANTHROPIC_API_KEY, SENTRY_DSN) from env vars. All other endpoints except `/health` and `/activate` return 503. `POST /activate` receives the full agent config (instanceName, systemPrompt, mcpServers, model, maxTurns, maxBudgetUsd), initializes the SDK runner, queue, and history, and transitions the worker to active.
+
+### Files to create
+
+| File | Purpose |
+|------|---------|
+| `src/worker/activation.ts` | Zod schema for activation payload, activation logic (creates SdkRunner, queue, history) |
+| `src/worker/activation.test.ts` | Unit tests |
+
+### Files to modify
+
+| File | Purpose |
+|------|---------|
+| `src/worker/routes.ts` | Add `POST /activate` endpoint; add dormant guard (503 for all non-health/activate endpoints) |
+| `src/worker/config.ts` | Simplify to boot config only: `ANTHROPIC_API_KEY`, `SENTRY_DSN`, `PORT`. Delete `AAS_INSTANCE_NAME`, `AAS_SYSTEM_PROMPT`, `AAS_MCP_SERVERS`, `AAS_MODEL`, `AAS_MAX_TURNS`, `AAS_MAX_BUDGET_USD` |
+| `src/entry.ts` | Worker path: parse boot config only, start HTTP server in dormant mode. Remove `parseWorkerConfig()` call for agent config at boot |
+| `src/shared/types.ts` | Add `activationSchema` for the POST /activate body |
 
 ### Worker State Machine
 
 ```
-(deployed) → idle
-idle → [POST /configure] → configuring → active
-active → [POST /reset] → resetting → idle
-active → [POST /configure] → configuring → active  (re-assign without reset)
+dormant → [POST /activate] → active
 ```
 
-- **idle**: Running, healthy, no instance config. Waiting for assignment. `/message` returns 503.
-- **configuring**: Applying new config. Brief transitional state.
-- **active**: Fully configured, processing messages for a specific instance.
-- **resetting**: Clearing session, history, config. Brief transitional state.
+No deactivation (destroy + replace).
 
----
+### Health Endpoint Changes
 
-## [S-5.0] Worker Dynamic Configuration
-
-As a developer, I want workers to accept configuration via HTTP so they can be assigned to instances without redeploying.
-
-### Description
-
-Add `POST /configure` endpoint to the worker. Replace env-var-only config with a two-phase approach: workers start with minimal env vars (just `ANTHROPIC_API_KEY`, `SENTRY_DSN`, `AAS_ROLE=worker`), then receive full instance config via HTTP. The worker's state machine transitions from idle → configuring → active on configure, and from active → resetting → idle on reset.
-
-### Files to create/modify
-
-| File | Purpose |
-|------|---------|
-| `src/worker/config.ts` | Add `WorkerState` union, `ConfigurePayload` schema, dynamic config application |
-| `src/worker/routes.ts` | Add `POST /configure` endpoint, gate `/message` on active state |
-| `src/worker/sdk-runner.ts` | Accept config dynamically instead of only via constructor |
-| `src/worker/server.ts` | Update health response to include worker state |
-| `src/worker/routes.test.ts` | Tests for configure, state transitions, gating |
-
-### `POST /configure` Request Body
-
-```typescript
-{
-  instanceName: string,        // e.g., "dev/A/michael"
-  systemPrompt: string,
-  mcpServers: McpServerConfig[],
-  model: string,
-  maxTurns: number,
-  maxBudgetUsd: number,
-  traceContext?: {             // parent trace from control plane
-    sentryTrace: string,
-    baggage: string,
-  }
-}
-```
+- **Dormant**: `{ status: "dormant", nodeVersion, platform, arch, uid }`
+- **Active**: `{ status: "ok", instanceName: "...", nodeVersion, platform, arch, uid }`
 
 ### Acceptance Criteria
 
-- [ ] `POST /configure` transitions worker from `idle` → `active` with provided config
-- [ ] `POST /configure` on an `active` worker resets session/history first, then applies new config (re-assignment)
-- [ ] `POST /message` returns 503 when worker is `idle` or `configuring`
-- [ ] `POST /reset` transitions `active` → `idle`, clears session, history, queue, and config
-- [ ] `GET /health` response includes `state: "idle" | "configuring" | "active" | "resetting"` and `instanceName` (null when idle)
-- [ ] Worker starts in `idle` state when no `AAS_INSTANCE_NAME` env var is set
-- [ ] Worker starts in `active` state when `AAS_INSTANCE_NAME` env var IS set (backwards compat with M4 per-instance provisioning)
-- [ ] Sentry service name updates dynamically: `aas-worker-idle` → `aas-worker-{instanceName}`
-- [ ] Telemetry: `POST /configure` wrapped in span, logs full config summary (system prompt length, MCP server count, model)
-- [ ] Telemetry: system prompt logged via `chunkedLog` on configure (verbose — the system prompt is the most important debugging artifact)
+- [ ] Worker boots without agent config (only secrets from env)
+- [ ] `/health` returns `dormant` status
+- [ ] All endpoints except `/health` and `/activate` return 503 `{ error: "Worker is dormant", code: "dormant" }`
+- [ ] `POST /activate` with valid config → worker transitions to active
+- [ ] After activation, all endpoints work as before
+- [ ] `POST /activate` on already-active worker → 409 Conflict
+- [ ] Unit tests cover dormant guards, activation success/failure, duplicate activation
+- [ ] Sentry telemetry: activation span, dormant state logged
 
 ---
 
-## [S-5.1] Pool Manager
+## [S-5.2] Local Docker E2E Verification
 
-As a developer, I want the control plane to manage a pool of idle workers so instances can be provisioned instantly.
+As a developer, I want to verify the full lifecycle works locally in Docker before touching Railway.
 
 ### Description
 
-Create `src/pool/manager.ts` with a `PoolManager` class that tracks idle and active workers. The pool manager is the single source of truth for worker assignments.
+Ensure docker-compose starts CP + dormant workers, activation works, and messages flow end-to-end.
+
+### Files to modify
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Ensure workers start dormant with only secrets |
+
+### Manual Verification
+
+1. `docker compose up` → CP + 3 dormant workers
+2. Workers report dormant health
+3. `curl POST worker-1/activate` with agent config → worker becomes active
+4. `curl POST cp/v1/instances/.../message` → SSE stream (if proxy is wired to local workers)
+5. Full message round-trip through activated worker
+
+### Acceptance Criteria
+
+- [ ] All worker tests pass: `npm run test`
+- [ ] Docker compose environment works end-to-end locally
+- [ ] Dormant → activate → message flow verified in Docker
+
+---
+
+## [S-5.3] Pool Manager + GHCR Image-Based Service Creation
+
+As a developer, I want a pool manager that pre-creates dormant worker services on Railway from GHCR images so that agent provisioning is instant.
+
+### Description
+
+New `WorkerPool` class manages a pool of Railway worker services. Workers are created from pre-built GHCR images (no Railway builds). A background monitor ensures a minimum number of dormant workers are always available.
 
 ### Files to create
 
 | File | Purpose |
 |------|---------|
-| `src/pool/manager.ts` | PoolManager class — idle/active tracking, acquire/release |
-| `src/pool/types.ts` | `PoolWorker` type, pool config |
-| `src/pool/manager.test.ts` | Unit tests |
+| `src/railway/pool.ts` | `WorkerPool` class with pool management, scaling, claiming, releasing |
+| `src/railway/pool.test.ts` | Unit tests with mocked Railway client |
 
-### PoolWorker Type
+### Files to modify
+
+| File | Purpose |
+|------|---------|
+| `src/railway/client.ts` | Modify `serviceCreate` to support image source: `serviceCreate(name, source?: { repo, branch } | { image: string })`. Add `serviceList()` method for discovery on CP restart. |
+
+### WorkerPool Data Model
 
 ```typescript
-type PoolWorker = {
-  workerId: string,           // unique ID (e.g., Railway service ID)
-  workerUrl: string,          // internal Railway URL
-  railwayServiceId: string,
-  state: 'idle' | 'active',
-  assignedInstance: string | null,  // instance name when active
-  lastHealthAt: string | null,
-  createdAt: string,
+type WorkerEntry = {
+  workerNumber: number          // monotonic, e.g. 1, 2, 3...
+  serviceId: string             // Railway service ID
+  workerUrl: string             // https://{domain}
+  assignedAgent: string | null  // null = dormant
+  status: 'creating' | 'dormant' | 'active' | 'error'
 }
 ```
 
-### Pool Configuration (env vars)
+### Key Methods
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `AAS_POOL_TARGET_IDLE` | `2` | Target number of idle workers to maintain |
-| `AAS_POOL_MAX_TOTAL` | `10` | Maximum total workers (idle + active) |
+| Method | Purpose |
+|--------|---------|
+| `ensurePoolSize(target)` | Creates workers in batch until pool has `target` dormant workers |
+| `claimWorker()` | Returns a dormant WorkerEntry and marks it as activating |
+| `releaseWorker(workerNumber)` | Destroys the Railway service, removes from pool |
+| `getDormantCount()` | Number of dormant workers |
+| `startPoolMonitor()` | Background interval: if dormant < 10, create 10 more |
+| `listWorkers()` | All workers with status |
 
-### Acceptance Criteria
+### Pool Creation Flow (per worker)
 
-- [ ] `acquire()` → returns an idle worker and marks it active, or null if pool empty
-- [ ] `release(workerId)` → marks worker as idle, clears assignment
-- [ ] `addWorker(worker)` → adds a newly provisioned worker to idle pool
-- [ ] `removeWorker(workerId)` → removes a worker from pool entirely
-- [ ] `getStatus()` → returns `{ idle: number, active: number, total: number, targetIdle: number, maxTotal: number }`
-- [ ] `getWorkerByInstance(instanceName)` → returns the worker assigned to an instance
-- [ ] Metrics: `pool.idle`, `pool.active`, `pool.total` gauges emitted on every state change
-- [ ] Logs: every acquire/release/add/remove logged with worker ID and instance name
-
----
-
-## [S-5.2] SDK Subprocess OTEL Tracing
-
-As a developer, I want SDK subprocess spans to appear as children of the worker's invocation span in Sentry so I get full end-to-end trace visibility.
-
-### Description
-
-The Claude Agent SDK `query()` runs as a subprocess. To connect its internal spans (LLM calls, tool execution) to the worker's trace, we must pass OTEL environment variables to the subprocess. Parse the Sentry DSN to derive the OTLP endpoint and set the required env vars before spawning.
-
-### Files to create/modify
-
-| File | Purpose |
-|------|---------|
-| `src/telemetry/otel-env.ts` | Helper to derive OTEL env vars from Sentry DSN + active span |
-| `src/worker/sdk-runner.ts` | Pass OTEL env vars to `query()` options |
-| `src/telemetry/otel-env.test.ts` | Unit tests for OTEL env derivation |
-
-### OTEL Environment Variables
-
-```typescript
-function getOtelEnvVars(sentryDsn: string, span: Sentry.Span): Record<string, string> {
-  // Parse DSN: https://{key}@{host}/{projectId}
-  // OTLP endpoint: https://{host}/api/{projectId}/otlp/
-  // Auth header: {key} as bearer token
-
-  const { traceId, spanId } = span.spanContext();
-
-  return {
-    OTEL_EXPORTER_OTLP_ENDPOINT: `https://${host}/api/${projectId}/otlp/`,
-    OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${key}`,
-    OTEL_RESOURCE_ATTRIBUTES: `service.name=aas-sdk-${instanceName}`,
-    TRACEPARENT: `00-${traceId}-${spanId}-01`,
-  };
-}
-```
-
-### Trace Hierarchy with OTEL
-
-```
-Caller Trace
-  └── Control Plane: POST /v1/instances/{name}/message
-        └── Proxy Request
-              └── Worker: POST /message
-                    └── SDK Invocation (parent span)
-                         ├── [SDK subprocess spans via OTEL]
-                         │    ├── claude.completion (LLM call)
-                         │    ├── tool.execute (tool call)
-                         │    └── claude.completion (LLM call)
-                         ├── Verbose logs (tool inputs, tool results, reasoning)
-                         └── Invocation metrics
-```
+1. `serviceCreate("aas-w-{N}", { image: "ghcr.io/.../aas-worker:latest" })`
+2. `variableCollectionUpsert(serviceId, { ANTHROPIC_API_KEY, SENTRY_DSN })` — secrets only
+3. `serviceDomainCreate(serviceId)` → get URL
+4. Health poll until worker responds with `dormant` status
+5. Add to pool registry
 
 ### Acceptance Criteria
 
-- [ ] `getOtelEnvVars(dsn, span)` correctly parses Sentry DSN and derives OTLP endpoint
-- [ ] SDK `query()` receives OTEL env vars so subprocess spans are children of invocation span
-- [ ] In Sentry, SDK subprocess spans (LLM calls, tool execution) appear nested under the worker's invocation span
-- [ ] `TRACEPARENT` header uses the active invocation span's trace ID and span ID
-- [ ] If Sentry DSN is missing or invalid, OTEL env vars are omitted (fail-open)
-- [ ] Unit test: DSN parsing for various Sentry DSN formats
+- [ ] Pool creates worker services from GHCR image on startup
+- [ ] Each worker gets its own Railway URL
+- [ ] Pool monitor runs in background, scales by 10 when dormant < 10
+- [ ] Workers receive only secrets via env vars (not agent config)
+- [ ] `pool.claimWorker()` returns a dormant worker
+- [ ] `pool.releaseWorker()` destroys the Railway service
+- [ ] Railway client supports image-based service creation
+- [ ] Railway client supports `serviceList()` for pool discovery
+- [ ] Full telemetry: spans, logs, metrics for pool operations
 
 ---
 
-## [S-5.3] Verbose SDK Event Logging
+## [S-5.4] Pool-Based Provisioning + Instance Lifecycle Rewrite
 
-As a developer, I want every significant SDK event logged verbosely so I can debug agent behavior from logs alone, without needing to reproduce the scenario.
+As a developer, I want instance provisioning to use the worker pool so that agent creation is instant (seconds instead of minutes).
 
 ### Description
 
-Enhance `SdkRunner` to log every SDK event with full content. System prompts, tool call inputs, tool results, and assistant reasoning text are all logged via `chunkedLog`. Every log line follows the structured format: `{instanceName} | {event}.{turn} | {content}`.
+Rewrite instance provisioning to claim a dormant worker from the pool and activate it via HTTP. Delete old Railpack-based provisioning.
 
 ### Files to modify
 
 | File | Purpose |
 |------|---------|
-| `src/worker/sdk-runner.ts` | Add verbose logging for all SDK events |
+| `src/routes/instances.ts` | **Rewrite**: POST claims dormant worker + activates; PATCH destroys + re-provisions; DELETE releases worker |
+| `src/railway/provisioner.ts` | **Delete/gut**: old Railpack flow replaced by pool-based activation |
+| `src/railway/health-poller.ts` | **Adapt**: pool workers in `dormant` status are healthy; deploy polling used by pool manager |
+| `src/registry/store.ts` | **Adapt**: add `workerNumber` field to InstanceRecord |
+| `src/shared/types.ts` | Update status semantics: `provisioning` = "claiming + activating" (seconds) |
 
-### Log Events
+### Provisioning Flow (New)
 
-| Event | Format | Content |
-|-------|--------|---------|
-| `message.start` | `{name} \| message.start \| invocationId={id} prompt.len={n}` | Invocation metadata |
-| `prompt` | `{name} \| prompt \| [chunked]` | Full system prompt (first invocation only, or on config change) |
-| `user.{turn}` | `{name} \| user.{turn} \| [chunked]` | User message text |
-| `assistant.{turn}` | `{name} \| assistant.{turn} \| [chunked]` | Full assistant text for this turn |
-| `tool_use.{turn}` | `{name} \| tool_use.{turn} \| {toolName} [chunked input]` | Tool name + full JSON input |
-| `tool_result.{turn}` | `{name} \| tool_result.{turn} \| {toolName} [chunked result]` | Tool name + full result |
-| `reasoning.{turn}` | `{name} \| reasoning.{turn} \| [chunked]` | Extended thinking / reasoning content (if present) |
-| `message.done` | `{name} \| message.done \| status={s} turns={n} cost=${c} duration={d}ms` | Completion summary |
-| `message.error` | `{name} \| message.error \| {error}` | Error details |
+```
+POST /v1/instances:
+  1. Validate input, create InstanceRecord (status: provisioning)
+  2. pool.claimWorker() → get dormant worker
+  3. POST {workerUrl}/activate with agent config
+  4. On success: status → ready, link workerUrl + serviceId
+  5. On failure: status → error, release worker
+  6. Return 202 (still async, resolves in seconds)
+```
 
-### Chunking Rules
+### PATCH Behavior
 
-- System prompts: always chunked (typically 2k–20k chars)
-- Tool inputs: chunked if > 5000 chars
-- Tool results: chunked if > 5000 chars
-- Assistant text: chunked if > 5000 chars
-- Reasoning: chunked if > 5000 chars
+Workers don't support reconfiguration after activation. PATCH destroys the current worker, claims a new dormant worker, and activates with updated config. Status transitions: current status → `deploying` → `ready`.
+
+### DELETE Behavior
+
+1. Set status → `destroying`
+2. `pool.releaseWorker()` → Railway service deleted
+3. Remove from store
+4. Pool monitor creates replacement dormant worker
 
 ### Acceptance Criteria
 
-- [ ] System prompt logged via `chunkedLog` on first invocation for an instance
-- [ ] User message logged on every invocation
-- [ ] Every `assistant_text` block logged with full text, chunked if needed
-- [ ] Every `tool_use` logged with tool name and full JSON input
-- [ ] Every `tool_result` logged with tool name and full result content
-- [ ] Reasoning/thinking content logged if present in SDK messages
-- [ ] All log lines follow the `{instanceName} | {event}.{turn} | {content}` format
-- [ ] All logs include `invocationId` as a Sentry attribute for filterability
-- [ ] Log content is not truncated or summarized — full content is always preserved (chunked if long)
-- [ ] `message.done` summary includes turns, cost, duration, stop reason
-- [ ] Existing SSE event streaming is unaffected — logging is additive
+- [ ] `POST /v1/instances` claims a dormant worker and activates it (seconds, not minutes)
+- [ ] `DELETE /v1/instances` destroys the worker service, pool monitor creates replacement
+- [ ] `PATCH /v1/instances` destroys + re-provisions with updated config
+- [ ] Pool dormant count decreases on provision, increases as new workers are created
+- [ ] All existing proxy routes work unchanged (worker URLs are the same format)
+- [ ] Old provisioner code (`buildVariables`, `sanitizeServiceName`, `createServiceWithRetry`) deleted
+- [ ] Full telemetry for new flow
 
 ---
 
-## [S-5.4] Pool-Aware Provisioning
+## [S-5.5] Spec + Doc Rewrite
 
-As a developer, I want `POST /v1/instances` to assign a worker from the pool instead of creating a Railway service, so provisioning completes in under a second.
+As a developer, I want all specs and docs updated for the new pool-based architecture so the documentation accurately reflects the system.
 
 ### Description
 
-Rewrite the provisioning flow to first attempt pool assignment. If the pool has idle workers, acquire one and call `POST /configure` on it. If the pool is empty, fall back to Railway service creation (slow path) and add the new worker to the pool after it becomes healthy.
+Aggressively rewrite all specs and docs. Delete all Railpack and old provisioning references. Update architecture diagrams, env var lists, and file references.
+
+### Files to rewrite
+
+| File | Purpose |
+|------|---------|
+| `spec/functional/README.md` | Update architecture diagram, tech stack (Docker + GHCR, not Railpack) |
+| `spec/functional/railway-integration.md` | Complete rewrite: GHCR images, pool management, no Railpack |
+| `spec/functional/instances.md` | Update provisioning flow (pool-based), lifecycle diagram |
+| `spec/functional/worker-api.md` | Add dormant state, `/activate` endpoint, remove env-var-based config |
+| `spec/plan/README.md` | Add M5, update milestone graph |
+| `spec/plan/milestone-4-containerization.md` | Mark completed stories, note M5 supersedes S-4.8+ |
+| `AGENTS.md` | Update deployment section, directory structure, env vars |
+
+### Files to update (lighter touch)
+
+| File | Purpose |
+|------|---------|
+| `spec/functional/invocation.md` | Update flow diagram to show pool-based worker |
+| `spec/functional/telemetry.md` | Add pool manager metrics |
+| `spec/functional/hierarchy.md` | Update service naming (now `aas-w-{number}` not `aas-w-{name}`) |
+
+### Cleanup targets (remove all references to)
+
+- Railpack
+- `AAS_ROLE` as a per-worker env var (baked into Dockerfile now)
+- `buildVariables()` / per-agent env var injection
+- Per-agent Railway service creation
+- Old provisioning flow (create → set vars → deploy → health poll → ready)
+
+### Acceptance Criteria
+
+- [ ] All spec files internally consistent (no contradictions)
+- [ ] Stories reference correct file paths and existing code
+- [ ] `AGENTS.md` accurately reflects the new architecture
+- [ ] No remaining references to Railpack or old provisioning flow
+
+---
+
+## [S-5.6] Railway Deployment + E2E Verification
+
+As a developer, I want to deploy the pool architecture to Railway and verify it works end-to-end.
+
+### Description
+
+Build and push Docker images to GHCR, deploy CP to Railway, verify pool creation and full agent lifecycle.
 
 ### Files to modify
 
 | File | Purpose |
 |------|---------|
-| `src/routes/instances.ts` | POST handler uses pool manager |
-| `src/railway/provisioner.ts` | Add pool-aware provisioning path |
-| `src/routes/instances.test.ts` | Tests for pool assignment |
+| `package.json` | Update deploy scripts: `docker:build`, `docker:push`, `deploy` |
 
-### Provisioning Flow
+### Verification
 
-```
-POST /v1/instances
-  ├── pool has idle worker?
-  │    ├── YES → acquire worker → POST /configure → status: ready (< 1s)
-  │    └── NO  → Railway serviceCreate → deploy → health poll → status: ready (2-5 min)
-  └── return 202 with instance
-```
-
-### Trace Propagation on Configure
-
-When calling `POST /configure` on the worker, the control plane forwards trace context:
-
-```typescript
-const traceHeaders = getTraceHeaders();
-await fetch(`${worker.workerUrl}/configure`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json", ...traceHeaders },
-  body: JSON.stringify({
-    ...configPayload,
-    traceContext: {
-      sentryTrace: traceHeaders["sentry-trace"],
-      baggage: traceHeaders["baggage"],
-    },
-  }),
-});
-```
+1. Build + push images to GHCR
+2. Deploy CP to Railway
+3. CP creates worker services from GHCR image
+4. Workers report dormant health
+5. `POST /v1/instances` → worker activated, agent ready in seconds
+6. Send message → SSE stream
+7. Delete instance → worker destroyed, pool replenished
+8. Verify Sentry traces span full lifecycle
 
 ### Acceptance Criteria
 
-- [ ] POST /v1/instances acquires an idle worker when available → status goes directly to `ready`
-- [ ] POST /v1/instances falls back to Railway provisioning when pool is empty → status follows `provisioning` → `deploying` → `ready`
-- [ ] `POST /configure` call to worker carries `sentry-trace` and `baggage` headers (distributed trace continuity)
-- [ ] Worker's configure span appears as a child of the control plane's provision span in Sentry
-- [ ] Instance record stores `poolWorkerId` linking to the assigned pool worker
-- [ ] Metrics: `provision.pool_hit` vs `provision.pool_miss` counters
-- [ ] Provisioning latency metric captures the dramatic difference between pool hit and miss
-- [ ] If `POST /configure` fails, release the worker back to idle and return error
+- [ ] Docker images build and push to GHCR
+- [ ] CP deploys to Railway and creates worker pool
+- [ ] Full lifecycle verified: provision → message → delete → pool replenish
+- [ ] Sentry traces span from caller through CP to worker
+- [ ] Agent creation completes in seconds (not minutes)
 
 ---
 
-## [S-5.5] Pool-Aware Deletion & Recycling
+## Open Items (For Implementation Phase)
 
-As a developer, I want `DELETE /v1/instances` to recycle the worker back to the pool instead of destroying the Railway service.
-
-### Description
-
-When deleting an instance backed by a pool worker, call `POST /reset` on the worker and return it to the idle pool. The Railway service stays alive. Only non-pool workers (legacy or overflow) get their Railway service deleted.
-
-### Files to modify
-
-| File | Purpose |
-|------|---------|
-| `src/routes/instances.ts` | DELETE handler uses pool manager |
-| `src/routes/instances.test.ts` | Tests for recycling |
-
-### Deletion Flow
-
-```
-DELETE /v1/instances/{name}
-  ├── instance has poolWorkerId?
-  │    ├── YES → POST /reset on worker → release to pool → remove instance record
-  │    └── NO  → Railway serviceDelete → remove instance record (legacy M4 path)
-  └── return { deleted: 1 }
-```
-
-### Acceptance Criteria
-
-- [ ] DELETE recycles pool workers: calls `POST /reset`, releases to idle pool
-- [ ] DELETE destroys non-pool workers: calls Railway `serviceDelete`
-- [ ] Nuke-by-prefix recycles all matching pool workers
-- [ ] Recycled worker is immediately available for re-assignment
-- [ ] Trace context propagated on `POST /reset` call
-- [ ] Metrics: `recycle.count`, `recycle.duration_ms`
-- [ ] If `POST /reset` fails, remove worker from pool entirely (don't leave broken workers in pool)
-
----
-
-## [S-5.6] Pool Replenishment
-
-As a developer, I want the control plane to automatically maintain a target number of idle workers so provisioning always hits the fast path.
-
-### Description
-
-Background loop that monitors pool state and provisions new Railway services when idle count drops below target. Also terminates excess idle workers when count exceeds max.
-
-### Files to create
-
-| File | Purpose |
-|------|---------|
-| `src/pool/replenisher.ts` | Background loop for pool sizing |
-| `src/pool/replenisher.test.ts` | Unit tests |
-
-### Replenishment Logic
-
-```
-Every 30 seconds:
-  idle = pool.idleCount()
-  total = pool.totalCount()
-
-  if idle < targetIdle AND total < maxTotal:
-    deficit = min(targetIdle - idle, maxTotal - total)
-    for i in 0..deficit:
-      create Railway service (minimal env vars: AAS_ROLE=worker, ANTHROPIC_API_KEY, SENTRY_DSN)
-      health poll → once healthy → add to pool as idle
-
-  if idle > targetIdle + 2:  (hysteresis)
-    excess = idle - targetIdle
-    for i in 0..excess:
-      remove oldest idle worker
-      Railway serviceDelete
-```
-
-### Acceptance Criteria
-
-- [ ] Replenisher creates workers when idle count drops below target
-- [ ] Replenisher terminates excess workers (with hysteresis to avoid flapping)
-- [ ] New pool workers use minimal env vars (no instance-specific config)
-- [ ] New pool workers are added to pool only after health check passes
-- [ ] Replenisher runs every 30 seconds
-- [ ] `pool.replenish.created` and `pool.replenish.terminated` metrics
-- [ ] Entire replenishment cycle wrapped in Sentry span
-- [ ] Replenisher failure does not crash the control plane (fail-open)
-
----
-
-## [S-5.7] Instance Lifecycle Rewrite
-
-As a developer, I want the instance CRUD API to fully integrate pool architecture, OTEL tracing, and verbose logging.
-
-### Description
-
-Rewrite `src/routes/instances.ts` and `src/registry/store.ts` to use pool-aware provisioning/deletion, propagate traces on all worker calls, and ensure the full request lifecycle is observable. This is the integration story that ties together S-5.0 through S-5.6.
-
-### Files to modify
-
-| File | Purpose |
-|------|---------|
-| `src/routes/instances.ts` | Full CRUD rewrite with pool integration |
-| `src/registry/store.ts` | Updated store with pool worker references |
-| `src/shared/types.ts` | Add `poolWorkerId` to `InstanceRecord` |
-| `src/routes/proxy.ts` | Resolve worker URL from pool manager |
-| `src/routes/instances.test.ts` | Updated tests |
-| `src/registry/store.test.ts` | Updated tests |
-
-### Updated InstanceRecord
-
-```typescript
-type InstanceRecord = {
-  // ... existing fields ...
-  poolWorkerId: string | null,     // links to PoolWorker.workerId
-  configuredAt: string | null,     // when POST /configure was called
-}
-```
-
-### Updated Status Flow (Pool Path)
-
-```
-(not exist) → [POST, pool hit] → ready           (< 1 second)
-(not exist) → [POST, pool miss] → provisioning → deploying → ready  (2-5 min)
-ready → [PATCH] → configuring → ready           (POST /configure on existing worker)
-ready → [DELETE] → recycling → (not exist)       (POST /reset, return to pool)
-```
-
-### Acceptance Criteria
-
-- [ ] POST returns 202, uses pool when available, falls back to Railway
-- [ ] PATCH calls `POST /configure` on the assigned worker (no Railway redeploy)
-- [ ] PATCH blocked while `provisioning` → 409
-- [ ] DELETE recycles pool workers, destroys non-pool workers
-- [ ] GET returns `InstanceRecord` with `poolWorkerId` and `configuredAt`
-- [ ] Proxy routes resolve worker URL via pool manager
-- [ ] All worker HTTP calls carry `sentry-trace` + `baggage` headers
-- [ ] Old `AgentInstance` type fully removed
-- [ ] Verbose logging on all lifecycle operations
-
----
-
-## [S-5.8] E2E Pool Lifecycle Test
-
-As a developer, I want to verify the full pool lifecycle works end-to-end with trace continuity.
-
-### Description
-
-Integration test exercising: pool warm-up → provision (pool hit) → message → history → status → PATCH → message → delete (recycle) → re-provision (same worker reused). Verify Sentry traces span from control plane through worker for every operation.
-
-### Acceptance Criteria
-
-- [ ] Pool starts with target idle workers
-- [ ] Provision hits pool → instance ready in < 2 seconds
-- [ ] Send message → SSE stream with expected events
-- [ ] Verbose logs visible: system prompt, tool calls, tool results
-- [ ] Fetch history → conversation visible
-- [ ] Fetch status → runtime info correct
-- [ ] PATCH instance → worker reconfigured in-place (no redeploy)
-- [ ] Delete instance → worker recycled to pool
-- [ ] Re-provision → same worker ID reused from pool
-- [ ] Sentry traces continuous from control plane through worker on every operation
-- [ ] SDK subprocess spans visible under invocation span (OTEL propagation)
-- [ ] All metrics emitted correctly (pool gauges, provision hit/miss, recycle count)
-- [ ] Pool replenisher replaces used workers within 60 seconds
-
----
-
-## Cross-Cutting: Distributed Tracing Requirements
-
-Every story in M5 MUST satisfy these tracing requirements. These are not optional — they are exit criteria for every story.
-
-### 1. Trace Propagation on All Worker HTTP Calls
-
-Every HTTP call from control plane to worker MUST include `sentry-trace` and `baggage` headers:
-
-```typescript
-const traceHeaders = getTraceHeaders(); // from active Sentry span
-fetch(workerUrl + endpoint, { headers: { ...traceHeaders, ... }, ... });
-```
-
-This applies to: `/configure`, `/reset`, `/message`, `/history`, `/status`, `/health`.
-
-### 2. Worker MUST Continue Incoming Traces
-
-The worker's HTTP middleware already calls `Sentry.continueTrace()` with incoming headers. This MUST remain in place. All worker spans for a request MUST be children of the control plane's span.
-
-### 3. SDK Subprocess OTEL Propagation
-
-Every `query()` call MUST pass OTEL env vars so SDK-internal spans (LLM calls, tool execution) appear as children of the invocation span in Sentry.
-
-### 4. Verbose Logging Is Mandatory
-
-Every SDK event (system prompt, user message, assistant text, tool calls, tool results, reasoning) MUST be logged with full content using `chunkedLog`. No summarization, no truncation. The logs must be sufficient to reconstruct the entire agent conversation from Sentry alone.
-
-### 5. Log Format
-
-All log lines MUST follow:
-```
-{instanceName} | {event}.{turn} | {content/attributes}
-```
-
-With `invocationId` as a Sentry attribute on every log entry.
-
-### 6. Response Headers
-
-All responses MUST include `x-sentry-trace-id` via `jsonResponse()` / `streamResponse()` helpers.
+- **Railway image source API**: Confirm `serviceCreate` mutation accepts `source: { image: "..." }` field. If not, explore alternative (Railway CLI `railway up` with `--image`, or setting the service source after creation).
+- **Railway service list API**: Need a `serviceList` or `services` query to discover existing workers on CP restart. If unavailable, CP starts fresh pool on every restart (orphan cleanup done manually or via a cleanup script).

@@ -1,6 +1,6 @@
 # Messaging
 
-Send messages to agent instances through the control plane. The control plane proxies requests to the worker container, which runs the Claude Agent SDK and streams the response back via SSE.
+Send messages to agent instances through the control plane. The control plane proxies requests to the worker (activated from the dormant pool), which runs the Claude Agent SDK and streams the response back via SSE.
 
 ## Message Request
 
@@ -114,7 +114,7 @@ Sessions provide conversation continuity across messages. The agent remembers pr
 
 - Worker creates a new SDK session on first message
 - Subsequent messages use the SDK `resume` parameter with the stored sessionId
-- Config updates (PATCH on control plane) trigger a worker redeploy, which resets the session
+- Config updates (PATCH on control plane) trigger a destroy + re-provision from the pool, which resets the session
 - Sessions are in-memory only — lost on container restart
 
 ## Abort

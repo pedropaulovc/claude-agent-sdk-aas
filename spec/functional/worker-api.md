@@ -1,130 +1,110 @@
 # Worker API
 
-Each worker container runs a Hono HTTP server exposing endpoints for configuration, messaging, history, status, and health. Workers can operate in two modes:
-
-1. **Pool mode** (M5): Worker starts idle with minimal config, receives full instance config via `POST /configure`, and can be recycled via `POST /reset`.
-2. **Standalone mode** (M4 compat): Worker reads config from environment variables and starts active immediately.
-
-## Worker State Machine
-
-```
-(deployed, no AAS_INSTANCE_NAME) → idle
-(deployed, AAS_INSTANCE_NAME set) → active     (standalone mode)
-
-idle → [POST /configure] → configuring → active
-active → [POST /reset] → resetting → idle
-active → [POST /configure] → configuring → active  (re-assign without reset)
-```
-
-| State | Description | `/message` | `/configure` | `/reset` |
-|-------|-------------|-----------|-------------|---------|
-| `idle` | Running, no instance config. Waiting for assignment. | 503 | Allowed | 200 (no-op) |
-| `configuring` | Applying new config. Brief transitional state. | 503 | 409 | 409 |
-| `active` | Fully configured, processing messages. | Allowed | Allowed (re-assign) | Allowed |
-| `resetting` | Clearing state. Brief transitional state. | 503 | 409 | 409 |
+Each worker container runs a Hono HTTP server. Workers start in **dormant** mode — only `/health` and `/activate` respond. Once activated via `POST /activate`, all endpoints become available. Workers are configured at activation time via HTTP, not via environment variables.
 
 ## Configuration
 
-### Pool Mode (M5)
+### Boot Config (Environment Variables)
 
-Workers start with minimal environment variables:
-
-| Env Var | Required | Description |
-|---------|----------|-------------|
-| `AAS_ROLE` | Yes | Must be `worker` |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
-| `SENTRY_DSN` | Yes | Sentry DSN for telemetry |
-| `PORT` | No | HTTP port (default 8080, injected by Railway) |
-
-Full instance config is received via `POST /configure`.
-
-### Standalone Mode (M4 compat)
-
-Workers read all configuration from environment variables:
+Workers boot with only secrets. Agent configuration is delivered at activation time.
 
 | Env Var | Required | Default | Description |
 |---------|----------|---------|-------------|
-| `AAS_ROLE` | Yes | — | Must be `worker` |
-| `AAS_INSTANCE_NAME` | Yes | — | Hierarchical instance name (e.g., `dev/A/michael`) |
-| `AAS_SYSTEM_PROMPT` | Yes | — | System prompt for the agent |
-| `AAS_MCP_SERVERS` | No | `[]` | JSON-encoded `McpServerConfig[]` |
-| `AAS_MODEL` | No | `claude-haiku-4-5-20251001` | Claude model ID |
-| `AAS_MAX_TURNS` | No | `50` | Max turns per invocation |
-| `AAS_MAX_BUDGET_USD` | No | `1.0` | Max budget per invocation (USD) |
+| `AAS_ROLE` | No | — | Baked into `Dockerfile.worker` as `worker` |
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `SENTRY_DSN` | Yes | — | Sentry DSN for telemetry |
 | `PORT` | No | `8080` | HTTP port (injected by Railway) |
 
-When `AAS_INSTANCE_NAME` is set, the worker starts directly in `active` state.
+### Activation Config (HTTP Body)
+
+Delivered via `POST /activate` after the worker is running:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `instanceName` | string | Yes | — | Hierarchical instance name (e.g., `dev/A/michael`) |
+| `systemPrompt` | string | Yes | — | System prompt for the agent |
+| `mcpServers` | McpServerConfig[] | No | `[]` | Remote MCP server configurations |
+| `model` | string | No | `claude-haiku-4-5-20251001` | Claude model ID |
+| `maxTurns` | number | No | `50` | Max turns per invocation |
+| `maxBudgetUsd` | number | No | `1.0` | Max budget per invocation (USD) |
+
+## Worker State Machine
+
+```
+dormant → [POST /activate] → active
+```
+
+No deactivation — workers are destroyed and replaced from the pool.
+
+### Dormant State
+
+When dormant:
+- `/health` returns `{ status: "dormant", nodeVersion, platform, arch, uid }`
+- `/activate` accepts activation requests
+- **All other endpoints** return `503 { error: "Worker is dormant", code: "dormant" }`
+
+### Active State
+
+When active:
+- All endpoints function normally
+- `/health` returns `{ status: "ok", instanceName: "...", nodeVersion, platform, arch, uid }`
+- `/activate` returns `409 Conflict` (already activated)
 
 ## Endpoints
 
-| Method | Path | Purpose | Requires Active |
-|--------|------|---------|----------------|
-| POST | `/configure` | Apply instance config (pool mode) | No (idle or active) |
-| POST | `/message` | Send message → SSE stream response | Yes |
-| GET | `/history` | Conversation history | Yes |
-| GET | `/status` | Runtime status | No |
-| GET | `/health` | Health check (Railway readiness) | No |
-| POST | `/abort` | Abort current invocation | Yes |
-| POST | `/reset` | Reset → return to idle | Yes |
+| Method | Path | Dormant | Active | Purpose |
+|--------|------|---------|--------|---------|
+| POST | `/activate` | Yes | 409 | Activate worker with agent config |
+| POST | `/message` | 503 | Yes | Send message → SSE stream response |
+| GET | `/history` | 503 | Yes | Conversation history |
+| GET | `/status` | 503 | Yes | Runtime status |
+| GET | `/health` | Yes | Yes | Health check |
+| POST | `/abort` | 503 | Yes | Abort current invocation |
+| POST | `/reset` | 503 | Yes | Reset session + clear history |
 
 ---
 
-### POST `/configure`
+### POST `/activate`
 
-Apply instance configuration to an idle or active worker. This is the primary mechanism for pool-based provisioning.
+Transition the worker from dormant to active. Initializes the SDK runner, message queue, and history.
 
 #### Request Body
 
 ```typescript
 {
-  instanceName: string,
-  systemPrompt: string,
-  mcpServers: McpServerConfig[],
-  model: string,               // default: "claude-haiku-4-5-20251001"
-  maxTurns: number,            // default: 50
-  maxBudgetUsd: number,        // default: 1.0
-  traceContext?: {
-    sentryTrace: string,
-    baggage: string,
-  }
+  "instanceName": "dev/A/michael",
+  "systemPrompt": "You are Michael Scott...",
+  "mcpServers": [{ "name": "slack", "url": "https://..." }],
+  "model": "claude-haiku-4-5-20251001",
+  "maxTurns": 50,
+  "maxBudgetUsd": 1.0
 }
 ```
 
-#### Behavior
-
-1. Validate the payload with Zod
-2. If worker is `active`: clear session, history, and queue first (implicit reset)
-3. Apply the new config in-memory
-4. Initialize fresh SdkRunner and HistoryStore
-5. Update Sentry service name to `aas-worker-{instanceName}`
-6. Transition state: `idle` → `configuring` → `active`
-7. **Log the full system prompt** via `chunkedLog` (verbose — this is the most important debugging artifact)
-8. Log config summary: `{instanceName} | configure | prompt.len={n} mcpServers={n} model={model}`
+Validated with `activationSchema` (Zod) in `src/shared/types.ts`.
 
 #### Response
 
+Success (200):
 ```typescript
-{ configured: true, instanceName: "dev/A/michael", state: "active" }
+{ "activated": true, "instanceName": "dev/A/michael" }
 ```
 
-Returns 409 if worker is in `configuring` or `resetting` state.
+Already active (409):
+```typescript
+{ "error": "Worker is already active", "code": "already_active", "instanceName": "dev/A/michael" }
+```
 
-#### Telemetry
-
-- Span: `worker.configure` wrapping the entire operation
-- Log: system prompt chunked, config summary
-- Metrics: `configure.count`, `configure.duration_ms`
-- Trace context from request used as parent span
+Invalid body (400):
+```typescript
+{ "error": "Validation error: ...", "code": "validation_error" }
+```
 
 ---
 
 ### POST `/message`
 
 Send a user message to the agent. Returns an SSE stream of events as the agent processes.
-
-**Requires worker state: `active`**. Returns 503 if idle, configuring, or resetting.
 
 #### Request Body
 
@@ -169,33 +149,15 @@ Queue full (25 items):
 
 1. If no `sessionId` exists, call SDK `query()` to start a new session
 2. If `sessionId` exists, call SDK `query()` with `resume` parameter
-3. **Pass OTEL env vars** to `query()` for subprocess trace propagation (see [telemetry.md](telemetry.md))
-4. Stream SDK events as SSE to the caller
-5. **Log every SDK event verbosely** (system prompt, assistant text, tool calls, tool results, reasoning)
-6. On completion, store the returned `sessionId` for next invocation
-7. Accumulate messages in history
-
-#### Verbose Logging
-
-Every SDK event is logged with full content. See [telemetry.md](telemetry.md) for the complete list of mandatory log events. Key events:
-
-```
-{instanceName} | message.start | invocationId={id} prompt.len={n}
-{instanceName} | user.{turn} | {full user message}
-{instanceName} | assistant.{turn} | {full assistant text, chunked}
-{instanceName} | tool_use.{turn} | {toolName} {full JSON input, chunked}
-{instanceName} | tool_result.{turn} | {toolName} -> {full result, chunked}
-{instanceName} | reasoning.{turn} | {full reasoning text, chunked}
-{instanceName} | message.done | status={s} turns={n} cost=${c} duration={d}ms
-```
+3. Stream SDK events as SSE to the caller
+4. On completion, store the returned `sessionId` for next invocation
+5. Accumulate messages in history
 
 ---
 
 ### GET `/history`
 
 Returns the full in-memory conversation history.
-
-**Requires worker state: `active`**. Returns 503 if idle.
 
 #### Response
 
@@ -226,21 +188,20 @@ Returns the full in-memory conversation history.
 
 - In-memory array of `HistoryMessage` objects
 - Capped at **1000 messages** — oldest messages are evicted when the cap is reached
-- History is cleared on `POST /configure` (new instance assignment) and `POST /reset`
+- History is lost on container restart (in-memory only)
 - Each message includes: `role` (`user` | `assistant`), `content`, `timestamp`, `invocationId`, and optional `toolCalls`
 
 ---
 
 ### GET `/status`
 
-Returns runtime status for the worker. Available in any state.
+Returns runtime status for the worker.
 
 #### Response
 
 ```typescript
 {
-  "instanceName": "dev/A/michael",  // null when idle
-  "state": "active",                // "idle" | "configuring" | "active" | "resetting"
+  "instanceName": "dev/A/michael",
   "model": "claude-haiku-4-5-20251001",
   "sessionId": "sess-789",
   "uptime": 3600000,
@@ -248,24 +209,21 @@ Returns runtime status for the worker. Available in any state.
   "totalCostUsd": 0.15,
   "queueDepth": 0,
   "activeInvocationId": null,
-  "startedAt": "2026-02-14T09:30:00.000Z",
-  "configuredAt": "2026-02-14T09:31:00.000Z"  // null when idle
+  "startedAt": "2026-02-14T09:30:00.000Z"
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instanceName` | string \| null | Instance name (null when idle) |
-| `state` | string | Worker state machine state |
-| `model` | string \| null | Claude model ID (null when idle) |
+| `instanceName` | string | Instance name from activation |
+| `model` | string | Claude model ID |
 | `sessionId` | string \| null | Current SDK session ID |
-| `uptime` | number | Milliseconds since worker process start |
-| `messageCount` | number | Total messages processed (across all assignments) |
-| `totalCostUsd` | number | Cumulative cost (across all assignments) |
+| `uptime` | number | Milliseconds since worker start |
+| `messageCount` | number | Total messages processed |
+| `totalCostUsd` | number | Cumulative cost across all invocations |
 | `queueDepth` | number | Current queue size |
 | `activeInvocationId` | string \| null | Currently running invocation |
-| `startedAt` | string | ISO timestamp of worker process start |
-| `configuredAt` | string \| null | ISO timestamp of last `POST /configure` |
+| `startedAt` | string | ISO timestamp of worker start |
 
 ---
 
@@ -275,23 +233,23 @@ Health check for Railway readiness probes and control-plane health polling.
 
 #### Response
 
+Dormant:
 ```typescript
-{
-  "status": "ok",
-  "instanceName": "dev/A/michael",  // null when idle
-  "state": "active"                 // "idle" | "active" | etc.
-}
+{ "status": "dormant", "nodeVersion": "22.x.x", "platform": "linux", "arch": "x64", "uid": 1000 }
 ```
 
-Returns 200 if the worker process is running. The `state` field tells the control plane whether the worker is idle (available for pool assignment) or active (serving an instance).
+Active:
+```typescript
+{ "status": "ok", "instanceName": "dev/A/michael", "nodeVersion": "22.x.x", "platform": "linux", "arch": "x64", "uid": 1000 }
+```
+
+Returns 200 in both states. The `status` field distinguishes dormant from active workers. The control plane's pool manager uses `"dormant"` to identify available workers; the health poller uses `"ok"` to confirm active workers are healthy.
 
 ---
 
 ### POST `/abort`
 
 Abort the currently running invocation.
-
-**Requires worker state: `active`**.
 
 #### Response
 
@@ -311,45 +269,36 @@ If no invocation is running. The abort kills the SDK subprocess and starts the n
 
 ### POST `/reset`
 
-Reset the worker and return it to idle state. Used by the pool manager to recycle workers.
+Reset the worker's session and clear conversation history.
 
 #### Response
 
 ```typescript
-{ "reset": true, "instanceName": "dev/A/michael", "state": "idle" }
+{ "reset": true, "instanceName": "dev/A/michael" }
 ```
 
 When no invocation is currently running, this:
-1. Transitions state to `resetting`
-2. Clears the invocation queue
-3. Resets `sessionId` to null
-4. Clears the conversation history
-5. Clears instance config (instanceName, systemPrompt, etc.)
-6. Updates Sentry service name to `aas-worker-idle`
-7. Transitions state to `idle`
+1. Clears the invocation queue
+2. Resets `sessionId` to null
+3. Clears the conversation history
 
 If an invocation is running, the reset is rejected → 409 Conflict. Callers should abort the invocation first.
-
-#### Telemetry
-
-- Span: `worker.reset`
-- Log: `{instanceName} | reset | returning to idle`
-- Metric: `reset.count`
 
 ## Error Handling
 
 | Error | Response |
 |-------|----------|
+| Worker is dormant | 503 `{ error: "Worker is dormant", code: "dormant" }` |
 | Invalid/empty message | 400 |
-| Worker not active (idle/configuring/resetting) for message/history/abort | 503 |
 | Queue full | 429 with `Retry-After: 5` header |
 | SDK error during invocation | SSE `error` event |
 | Reset while running | 409 Conflict |
-| Configure while configuring/resetting | 409 Conflict |
-| Invalid configure payload | 400 |
+| Activate while already active | 409 Conflict |
+| Invalid activation body | 400 |
 
 ## Related
 
 - **Messaging**: [invocation.md](invocation.md) — control-plane proxy behavior, SSE event types
 - **Instances**: [instances.md](instances.md) — instance configuration and lifecycle
-- **Telemetry**: [telemetry.md](telemetry.md) — worker metrics, verbose logging, OTEL subprocess tracing
+- **Telemetry**: [telemetry.md](telemetry.md) — worker metrics and tracing
+- **Railway Integration**: [railway-integration.md](railway-integration.md) — pool management, worker creation

@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-Long-lived container service managing named Claude Agent SDK instances. Runs as a standalone Hono server deployed to Railway — no Next.js, no database, all state in-memory.
+Long-lived container service managing named Claude Agent SDK instances. Runs as a standalone Hono server deployed to Railway — no Next.js, no database, all state in-memory. Workers are pre-built Docker images pulled from GHCR, starting dormant and activated via HTTP.
 
 ## Commands
 
@@ -15,23 +15,29 @@ Long-lived container service managing named Claude Agent SDK instances. Runs as 
 - `npm run typecheck` — TypeScript strict check
 - `npm run test` — Vitest unit tests
 - `npm run test:watch` — Vitest watch mode
-- `npm run deploy` — Deploy to Railway (`railway up -d`)
+- `npm run deploy` — Deploy to Railway
+- `npm run docker:build` — Build both Docker images
+- `npm run docker:push` — Push images to GHCR
+- `npm run docker:up` — Start local Docker environment (CP + workers)
+- `npm run docker:down` — Stop local Docker environment
 
 **Troubleshooting:** If any `npm run` command fails, the very first thing to try is `npm install`.
 
 ## Deployment
 
-Deployed to [Railway](https://railway.app) as a long-lived container. Railway uses Railpack (its zero-config builder) to auto-detect the Node.js/TypeScript app from `package.json` and build an optimized container image. No Dockerfile needed.
+Deployed to [Railway](https://railway.app) as Docker containers pulled from GHCR. Two separate images: one for the control plane, one for workers.
 
-- **Build**: Railpack detects `package.json`, runs `npm ci` + the `build` script (`tsc`), and uses the `start` script (`node dist/entry.js`) as the entry point.
-- **Dual-role**: A single codebase serves both control plane and worker. `AAS_ROLE` env var selects the role at boot.
+- **Build**: Two Dockerfiles (`Dockerfile.cp`, `Dockerfile.worker`) produce separate images. Built locally or in CI, pushed to GHCR. Railway pulls images directly — no Railpack, no Railway builds.
+- **Control plane**: Single service pulling `ghcr.io/.../aas-cp:latest`. `AAS_ROLE=control-plane` is baked into the Dockerfile.
+- **Workers**: Pool of services, each pulling `ghcr.io/.../aas-worker:latest`. `AAS_ROLE=worker` is baked into the Dockerfile. Workers start dormant; the CP activates them via `POST /activate` with agent config.
+- **Pool management**: CP maintains a pool of dormant workers. Background monitor ensures dormant count >= 10. Workers are destroyed on agent delete; pool replenishes automatically.
+- **Local dev**: `docker compose up` starts 1 CP + 3 dormant workers locally.
 - **CLI**: `npx @railway/cli@latest` (or install globally). Key commands:
   - `railway link` — Link local project to Railway service (one-time setup)
   - `railway up -d` — Deploy (detached, returns immediately)
   - `railway logs` — Tail production logs
   - `railway variables` — Manage env vars on Railway
-- **Environment variables**: Set `ANTHROPIC_API_KEY`, `SENTRY_DSN` via `railway variables` or the Railway dashboard. Railway injects `PORT` automatically.
-- **PR previews**: Railway auto-deploys a preview environment per GitHub PR. Railpack builds from the PR branch automatically.
+- **Environment variables**: Set `ANTHROPIC_API_KEY`, `SENTRY_DSN`, `RAILWAY_API_TOKEN` via `railway variables` or the Railway dashboard. Railway injects `PORT` automatically.
 
 ## Architecture
 
@@ -40,6 +46,9 @@ Deployed to [Railway](https://railway.app) as a long-lived container. Railway us
 - **Agent SDK**: @anthropic-ai/claude-agent-sdk for agent orchestration
 - **Telemetry**: @sentry/node for tracing, logs, metrics
 - **Validation**: Zod at API boundaries
+- **Container**: Docker (two images: `Dockerfile.cp`, `Dockerfile.worker`)
+- **Registry**: GHCR for pre-built images
+- **Worker Pool**: CP manages pool of dormant workers on Railway, activated via HTTP
 
 ## Directory Structure
 
@@ -48,12 +57,16 @@ src/
 ├── entry.ts              # Dual-role entry: reads AAS_ROLE, boots control-plane or worker
 ├── server.ts             # Control plane Hono app + route wiring
 ├── routes/               # API route handlers (health, instances, proxy)
+├── railway/              # Railway client, pool manager, health poller
 ├── registry/             # Instance store (InstanceStore class)
-├── railway/              # Railway GraphQL client, provisioner, health poller
-├── pool/                 # Pool manager, replenisher, pool worker types
-├── worker/               # Worker server, SDK runner, queue, history, routes
+├── worker/               # Worker server, routes, activation, SDK runner, queue, history
 ├── shared/               # Shared types (InstanceRecord, McpServerConfig, Zod schemas)
 └── telemetry/            # Sentry init, helpers, middleware, OTEL env var derivation
+
+Dockerfile.cp             # Control plane image
+Dockerfile.worker         # Worker image (with system deps: git, curl)
+.dockerignore             # Docker build exclusions
+docker-compose.yml        # Local dev: 1 CP + 3 dormant workers
 ```
 
 ## Code Conventions
@@ -87,17 +100,28 @@ src/
 
 All secrets live in `.env.local` (gitignored). If the file is missing, copy from `../the-office-a/.env.local`.
 
+#### Control Plane
+
 ```
-AAS_ROLE=control-plane          # Required: 'control-plane' or 'worker'
+AAS_ROLE=control-plane          # Baked into Dockerfile.cp (set in .env.local for local dev)
 ANTHROPIC_API_KEY=sk-ant-...    # Required
 SENTRY_DSN=https://...          # Required
-RAILWAY_API_TOKEN=...           # Required (for Railway API calls, control-plane only)
-AAS_POOL_TARGET_IDLE=2          # Optional, default 2 (control-plane only)
-AAS_POOL_MAX_TOTAL=10           # Optional, default 10 (control-plane only)
+RAILWAY_API_TOKEN=...           # Required (for Railway API calls)
 PORT=8080                       # Optional, default 8080
 ```
 
 `RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are auto-injected by Railway at runtime.
+
+#### Worker
+
+```
+AAS_ROLE=worker                 # Baked into Dockerfile.worker
+ANTHROPIC_API_KEY=sk-ant-...    # Required (injected by pool manager via Railway env vars)
+SENTRY_DSN=https://...          # Required (injected by pool manager via Railway env vars)
+PORT=8080                       # Optional (injected by Railway)
+```
+
+Agent config (instanceName, systemPrompt, mcpServers, model, maxTurns, maxBudgetUsd) is delivered at activation time via `POST /activate`, not via env vars.
 
 ## Key Specs
 
@@ -112,9 +136,9 @@ Telemetry is VITAL. **Be liberal — when in doubt, add a span, log, or metric.*
 
 ### What to Instrument
 
-- **Traces**: Every instance operation (provision, invoke, nuke), every API request, pool operations, and every significant async operation must be wrapped in a Sentry span. Nest child spans for sub-operations.
-- **Logs**: Structured logs for instance lifecycle events, invocation decisions, SDK events, and errors. Include relevant IDs (instanceName, sessionId, invocationId) as attributes so logs are filterable. **Be verbose**: log system prompts, tool call inputs, tool results, reasoning text — full content, chunked if needed. Logs must be sufficient to reconstruct the entire agent conversation from Sentry alone.
-- **Metrics**: Counters for invocations, queue depth, pool state, errors. Distributions for invocation latencies and token usage.
+- **Traces**: Every instance operation (provision, activate, nuke), every API request, every pool operation, and every significant async operation must be wrapped in a Sentry span. Nest child spans for sub-operations.
+- **Logs**: Structured logs for instance lifecycle events, invocation decisions, SDK events, pool operations, and errors. Include relevant IDs (instanceName, sessionId, invocationId, workerNumber) as attributes so logs are filterable. **Be verbose**: log system prompts, tool call inputs, tool results, reasoning text — full content, chunked if needed. Logs must be sufficient to reconstruct the entire agent conversation from Sentry alone.
+- **Metrics**: Counters for invocations, queue depth, pool size, errors. Distributions for invocation latencies, token usage, and activation times.
 
 ### Helpers (`src/telemetry/helpers.ts`)
 
