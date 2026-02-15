@@ -21,7 +21,7 @@ export const sentryMiddleware = createMiddleware(async (c, next) => {
 export function jsonResponse<T extends Record<string, unknown> | Record<string, unknown>[]>(
   c: Context,
   data: T,
-  status: 200 | 201 | 202 | 400 | 404 | 409 | 429 | 500 = 200,
+  status: 200 | 201 | 202 | 400 | 404 | 409 | 429 | 500 | 503 = 200,
 ): Response {
   const traceId = Sentry.getActiveSpan()?.spanContext().traceId;
   if (traceId) {
