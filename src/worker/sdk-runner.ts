@@ -203,9 +203,29 @@ export class SdkRunner {
     console.log("[DEBUG sdk-runner] SDK QUERY STARTED", { invocationId });
 
     let lastAssistantHadContent = false;
+    const WATCHDOG_TIMEOUT_MS = 30_000;
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    let watchdogFired = false;
+
+    const resetWatchdog = () => {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(() => {
+        watchdogFired = true;
+        const stderrOutput = stderrChunks.join("");
+        logError("SDK watchdog timeout — no events for 30s, aborting", {
+          invocationId,
+          stderr: stderrOutput,
+        });
+        console.log("[DEBUG sdk-runner] WATCHDOG FIRED", { invocationId, stderr: stderrOutput });
+        abortController.abort();
+      }, WATCHDOG_TIMEOUT_MS);
+    };
+
+    resetWatchdog();
 
     try {
       for await (const msg of q) {
+        resetWatchdog();
         console.log("[DEBUG sdk-runner] SDK MSG:", msg.type, "subtype" in msg ? (msg as Record<string, unknown>).subtype : "", { invocationId });
 
         if (signal.aborted) {
@@ -213,7 +233,6 @@ export class SdkRunner {
         }
 
         yield* this.mapMessage(msg, invocationId, turn, () => {
-          // Called when we see an assistant message — increment turn
           if (lastAssistantHadContent) {
             turn++;
           }
@@ -222,7 +241,6 @@ export class SdkRunner {
           lastAssistantHadContent = hadContent;
         });
 
-        // Handle result messages
         if (msg.type === "result") {
           if (msg.subtype === "success") {
             const success = msg as SDKResultSuccess;
@@ -268,13 +286,30 @@ export class SdkRunner {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       const stderrOutput = stderrChunks.join("");
-      console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage, stderr: stderrOutput });
-      logError("SDK invocation threw", { invocationId, error: errorMessage, stderr: stderrOutput });
-      countMetric("invocation.error", 1, { instanceName: this.config.instanceName });
-      yield {
-        event: "error",
-        data: { invocationId, error: errorMessage, code: "sdk_error", stderr: stderrOutput },
-      };
+
+      if (watchdogFired) {
+        logError("SDK invocation timed out (watchdog)", { invocationId, stderr: stderrOutput });
+        countMetric("invocation.error", 1, { instanceName: this.config.instanceName });
+        yield {
+          event: "error",
+          data: {
+            invocationId,
+            error: `SDK watchdog timeout: no events received within ${WATCHDOG_TIMEOUT_MS / 1000}s. stderr: ${stderrOutput || "(empty)"}`,
+            code: "sdk_watchdog_timeout",
+            stderr: stderrOutput,
+          },
+        };
+      } else {
+        console.log("[DEBUG sdk-runner] SDK LOOP THREW", { invocationId, error: errorMessage, stderr: stderrOutput });
+        logError("SDK invocation threw", { invocationId, error: errorMessage, stderr: stderrOutput });
+        countMetric("invocation.error", 1, { instanceName: this.config.instanceName });
+        yield {
+          event: "error",
+          data: { invocationId, error: errorMessage, code: "sdk_error", stderr: stderrOutput },
+        };
+      }
+    } finally {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
     }
   }
 

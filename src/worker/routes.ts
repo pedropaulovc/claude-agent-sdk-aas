@@ -103,6 +103,10 @@ workerRoutes.get("/health", (c) => {
   return jsonResponse(c, {
     status: "ok" as const,
     instanceName: workerConfig?.instanceName ?? "unknown",
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    uid: process.getuid?.() ?? null,
   });
 });
 
