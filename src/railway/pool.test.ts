@@ -36,6 +36,7 @@ function makeRailwayClient(overrides?: Partial<RailwayClient>): RailwayClient {
     }),
     serviceDelete: vi.fn().mockResolvedValue(undefined),
     variableCollectionUpsert: vi.fn().mockResolvedValue(undefined),
+    serviceInstanceDeploy: vi.fn().mockResolvedValue(undefined),
     serviceDomainCreate: vi.fn().mockImplementation((serviceId: string) =>
       Promise.resolve({ domain: `${serviceId}.up.railway.app` }),
     ),

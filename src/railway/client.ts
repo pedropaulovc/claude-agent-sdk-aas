@@ -120,6 +120,23 @@ export class RailwayClient {
     });
   }
 
+  async serviceInstanceDeploy(serviceId: string): Promise<void> {
+    return withSpan("railway.serviceInstanceDeploy", "railway.api", async (span) => {
+      span.setAttribute("railway.service.id", serviceId);
+
+      await this.execute<{ serviceInstanceDeploy: boolean }>(
+        "serviceInstanceDeploy",
+        `mutation serviceInstanceDeploy($serviceId: String!, $environmentId: String!) {
+          serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+        }`,
+        {
+          serviceId,
+          environmentId: this.env.RAILWAY_ENVIRONMENT_ID,
+        },
+      );
+    });
+  }
+
   async serviceList(): Promise<Array<{ id: string; name: string }>> {
     return withSpan("railway.serviceList", "railway.api", async (span) => {
       span.setAttribute("railway.project.id", this.env.RAILWAY_PROJECT_ID);

@@ -328,6 +328,8 @@ export class WorkerPool {
         this.config.secrets,
       );
 
+      await this.config.railwayClient.serviceInstanceDeploy(serviceId);
+
       const { domain } = await this.config.railwayClient.serviceDomainCreate(serviceId);
       const workerUrl = `https://${domain}`;
 
