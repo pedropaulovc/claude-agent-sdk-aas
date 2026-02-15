@@ -1,0 +1,10 @@
+node_modules
+.git
+src
+spec
+*.md
+.env*
+*.test.ts
+tsconfig.json
+eslint.config.js
+vitest.config.ts
