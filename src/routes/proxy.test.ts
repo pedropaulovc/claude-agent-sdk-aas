@@ -43,6 +43,7 @@ function makeRecord(
     status: "ready",
     railwayServiceId: "svc-123",
     workerUrl: "https://test-agent.up.railway.app",
+    workerNumber: 1,
     provisionError: null,
     createdAt: new Date("2026-01-01T00:00:00Z"),
     ...overrides,

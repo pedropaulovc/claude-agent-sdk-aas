@@ -54,6 +54,7 @@ describe("InstanceStore", () => {
     expect(instance.status).toBe("provisioning");
     expect(instance.railwayServiceId).toBeNull();
     expect(instance.workerUrl).toBeNull();
+    expect(instance.workerNumber).toBeNull();
     expect(instance.provisionError).toBeNull();
     expect(instance.createdAt).toBeInstanceOf(Date);
   });

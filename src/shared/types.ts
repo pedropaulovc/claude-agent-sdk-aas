@@ -58,6 +58,7 @@ export type InstanceRecord = {
   status: InstanceStatus;
   railwayServiceId: string | null;
   workerUrl: string | null;
+  workerNumber: number | null;
   provisionError: string | null;
   createdAt: Date;
 };

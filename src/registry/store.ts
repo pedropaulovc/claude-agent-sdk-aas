@@ -33,6 +33,7 @@ export class InstanceStore {
         status: "provisioning",
         railwayServiceId: null,
         workerUrl: null,
+        workerNumber: null,
         provisionError: null,
         createdAt: new Date(),
       };
