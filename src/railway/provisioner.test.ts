@@ -60,7 +60,6 @@ function makeStore(): InstanceStore {
 function makeRailwayClient(overrides?: Partial<RailwayClient>): RailwayClient {
   return {
     serviceCreate: vi.fn().mockResolvedValue({ serviceId: "svc-123" }),
-    serviceConnect: vi.fn().mockResolvedValue(undefined),
     serviceDelete: vi.fn().mockResolvedValue(undefined),
     variableCollectionUpsert: vi.fn().mockResolvedValue(undefined),
     serviceDomainCreate: vi.fn().mockResolvedValue({ domain: "my-agent.up.railway.app" }),
@@ -103,22 +102,20 @@ describe("provisioner", () => {
 
     await provisionInstance(record, store, client);
 
-    expect(client.serviceCreate).toHaveBeenCalledWith("aas-w-my-agent");
-    expect(client.variableCollectionUpsert).toHaveBeenCalledWith("svc-123", expect.objectContaining({
-      AAS_ROLE: "worker",
-      AAS_INSTANCE_NAME: "my-agent",
-      AAS_SYSTEM_PROMPT: "You are helpful.",
-      AAS_MCP_SERVERS: "[]",
-      AAS_MODEL: "claude-haiku-4-5-20251001",
-      AAS_MAX_TURNS: "50",
-      AAS_MAX_BUDGET_USD: "1",
-      ANTHROPIC_API_KEY: "sk-ant-test",
-      SENTRY_DSN: "https://sentry.test/123",
-    }));
-    expect(client.serviceConnect).toHaveBeenCalledWith(
-      "svc-123",
-      "pedropaulovc/claude-agent-sdk-aas",
-      "master",
+    expect(client.serviceCreate).toHaveBeenCalledWith(
+      "aas-w-my-agent",
+      { repo: "pedropaulovc/claude-agent-sdk-aas", branch: "master" },
+      expect.objectContaining({
+        AAS_ROLE: "worker",
+        AAS_INSTANCE_NAME: "my-agent",
+        AAS_SYSTEM_PROMPT: "You are helpful.",
+        AAS_MCP_SERVERS: "[]",
+        AAS_MODEL: "claude-haiku-4-5-20251001",
+        AAS_MAX_TURNS: "50",
+        AAS_MAX_BUDGET_USD: "1",
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        SENTRY_DSN: "https://sentry.test/123",
+      }),
     );
     expect(client.serviceDomainCreate).toHaveBeenCalledWith("svc-123");
 
@@ -138,8 +135,8 @@ describe("provisioner", () => {
 
     await provisionInstance(record, store, client);
 
-    const upsertCall = vi.mocked(client.variableCollectionUpsert).mock.calls[0];
-    const vars = upsertCall[1];
+    const createCall = vi.mocked(client.serviceCreate).mock.calls[0];
+    const vars = createCall[2] as Record<string, string>;
     expect(vars.AAS_MCP_SERVERS).toBe(JSON.stringify(mcpServers));
   });
 
@@ -152,7 +149,11 @@ describe("provisioner", () => {
 
     await provisionInstance(record, store, client);
 
-    expect(client.serviceCreate).toHaveBeenCalledWith("aas-w-team-project-agent");
+    expect(client.serviceCreate).toHaveBeenCalledWith(
+      "aas-w-team-project-agent",
+      expect.objectContaining({ repo: "pedropaulovc/claude-agent-sdk-aas" }),
+      expect.any(Object),
+    );
   });
 
   // --- Name collision retry ---
@@ -211,32 +212,6 @@ describe("provisioner", () => {
 
   // --- Cleanup on failure after service created ---
 
-  it("calls serviceDelete when variableCollectionUpsert fails", async () => {
-    const record = makeRecord();
-    const store = makeStore();
-    const variableCollectionUpsert = vi.fn().mockRejectedValue(new Error("vars failed"));
-    const client = makeRailwayClient({ variableCollectionUpsert } as unknown as Partial<RailwayClient>);
-
-    await provisionInstance(record, store, client);
-
-    expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
-    expect(record.status).toBe("error");
-    expect(record.provisionError).toBe("vars failed");
-  });
-
-  it("calls serviceDelete when serviceConnect fails", async () => {
-    const record = makeRecord();
-    const store = makeStore();
-    const serviceConnect = vi.fn().mockRejectedValue(new Error("connect failed"));
-    const client = makeRailwayClient({ serviceConnect } as unknown as Partial<RailwayClient>);
-
-    await provisionInstance(record, store, client);
-
-    expect(client.serviceDelete).toHaveBeenCalledWith("svc-123");
-    expect(record.status).toBe("error");
-    expect(record.provisionError).toBe("connect failed");
-  });
-
   it("calls serviceDelete when serviceDomainCreate fails", async () => {
     const record = makeRecord();
     const store = makeStore();
@@ -253,17 +228,17 @@ describe("provisioner", () => {
   it("sets error status even when cleanup also fails", async () => {
     const record = makeRecord();
     const store = makeStore();
-    const variableCollectionUpsert = vi.fn().mockRejectedValue(new Error("vars failed"));
+    const serviceDomainCreate = vi.fn().mockRejectedValue(new Error("domain failed"));
     const serviceDelete = vi.fn().mockRejectedValue(new Error("cleanup also failed"));
     const client = makeRailwayClient({
-      variableCollectionUpsert,
+      serviceDomainCreate,
       serviceDelete,
     } as unknown as Partial<RailwayClient>);
 
     await provisionInstance(record, store, client);
 
     expect(record.status).toBe("error");
-    expect(record.provisionError).toBe("vars failed");
+    expect(record.provisionError).toBe("domain failed");
   });
 
   // --- Metric emission ---

@@ -99,7 +99,7 @@ describe("RailwayClient", () => {
     expect(result).toEqual({ serviceId: "svc-abc" });
   });
 
-  it("serviceCreate sends correct GraphQL payload", async () => {
+  it("serviceCreate sends correct GraphQL payload without source", async () => {
     mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
     const client = makeClient();
 
@@ -113,6 +113,27 @@ describe("RailwayClient", () => {
     };
     expect(body.variables.input.name).toBe("my-service");
     expect(body.variables.input.projectId).toBe("proj-123");
+    expect(body.variables.input).not.toHaveProperty("source");
+    expect(body.variables.input).not.toHaveProperty("variables");
+  });
+
+  it("serviceCreate sends source, branch, and variables when provided", async () => {
+    mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
+    const client = makeClient();
+
+    await client.serviceCreate(
+      "my-service",
+      { repo: "owner/repo", branch: "main" },
+      { KEY: "value" },
+    );
+
+    const fetchCall = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(fetchCall[1]?.body as string) as {
+      variables: { input: { source: { repo: string }; branch: string; variables: Record<string, string> } };
+    };
+    expect(body.variables.input.source).toEqual({ repo: "owner/repo" });
+    expect(body.variables.input.branch).toBe("main");
+    expect(body.variables.input.variables).toEqual({ KEY: "value" });
   });
 
   it("serviceCreate sets span attributes", async () => {
@@ -135,33 +156,6 @@ describe("RailwayClient", () => {
       { name: "railway.serviceCreate", op: "railway.api" },
       expect.any(Function),
     );
-  });
-
-  // --- serviceConnect ---
-
-  it("serviceConnect sends correct GraphQL payload", async () => {
-    mockFetchSuccess({ serviceConnect: { id: "svc-abc" } });
-    const client = makeClient();
-
-    await client.serviceConnect("svc-abc", "owner/repo", "main");
-
-    const fetchCall = vi.mocked(fetch).mock.calls[0];
-    const body = JSON.parse(fetchCall[1]?.body as string) as {
-      variables: { id: string; input: { repo: string; branch: string } };
-    };
-    expect(body.variables.id).toBe("svc-abc");
-    expect(body.variables.input).toEqual({ repo: "owner/repo", branch: "main" });
-  });
-
-  it("serviceConnect sets span attributes", async () => {
-    mockFetchSuccess({ serviceConnect: { id: "svc-abc" } });
-    const client = makeClient();
-
-    await client.serviceConnect("svc-abc", "owner/repo", "main");
-
-    expect(mockSetAttribute).toHaveBeenCalledWith("railway.service.id", "svc-abc");
-    expect(mockSetAttribute).toHaveBeenCalledWith("railway.repo", "owner/repo");
-    expect(mockSetAttribute).toHaveBeenCalledWith("railway.branch", "main");
   });
 
   // --- serviceDelete ---
