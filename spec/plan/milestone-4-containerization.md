@@ -21,7 +21,7 @@ graph TD
 
 ---
 
-## [S-4.0] Shared Types & Entry Point
+## [S-4.0] Shared Types & Entry Point ✅
 
 As a developer, I want a dual-role entry point so a single codebase can boot as either control plane or worker.
 
@@ -48,7 +48,7 @@ Extract shared types into `src/shared/types.ts` and create `src/entry.ts` that r
 
 ---
 
-## [S-4.1] Railway GraphQL Client
+## [S-4.1] Railway GraphQL Client ✅
 
 As a developer, I want a typed client for Railway's GraphQL API so the control plane can manage worker services.
 
@@ -75,7 +75,7 @@ Create `src/railway/client.ts` with methods for service CRUD, environment variab
 
 ---
 
-## [S-4.2] Worker Scaffold
+## [S-4.2] Worker Scaffold ✅
 
 As a developer, I want a worker Hono server with a health endpoint so Railway can detect when the worker is ready.
 
@@ -103,7 +103,7 @@ Create `src/worker/server.ts` with a minimal Hono app and `GET /health` endpoint
 
 ---
 
-## [S-4.3] Worker SDK Integration
+## [S-4.3] Worker SDK Integration ✅
 
 As a developer, I want the worker to process messages via the Claude Agent SDK and stream responses as SSE.
 
@@ -132,7 +132,7 @@ Create `src/worker/sdk-runner.ts` and implement the `POST /message` endpoint. Th
 
 ---
 
-## [S-4.4] Worker History & Status
+## [S-4.4] Worker History & Status ✅
 
 As a developer, I want the worker to maintain conversation history and expose runtime status.
 
@@ -160,7 +160,7 @@ Create `src/worker/history.ts` for the in-memory history accumulator. Add `GET /
 
 ---
 
-## [S-4.5] Async Provisioner
+## [S-4.5] Async Provisioner ✅
 
 As a developer, I want the control plane to asynchronously provision Railway services when instances are created.
 
@@ -186,7 +186,7 @@ Create `src/railway/provisioner.ts` that orchestrates the Railway service creati
 
 ---
 
-## [S-4.6] Health Poller
+## [S-4.6] Health Poller ✅
 
 As a developer, I want the control plane to monitor worker health and transition statuses automatically.
 
@@ -213,7 +213,7 @@ Create `src/railway/health-poller.ts` that polls worker `/health` endpoints. Two
 
 ---
 
-## [S-4.7] Proxy Routes
+## [S-4.7] Proxy Routes ✅
 
 As a developer, I want the control plane to proxy message, history, and status requests to worker containers.
 
