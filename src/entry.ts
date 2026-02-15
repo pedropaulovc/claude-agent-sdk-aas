@@ -23,32 +23,27 @@ if (role === "control-plane") {
     console.log(`Control plane started on port ${PORT}`);
   });
 } else {
-  const { parseWorkerConfig } = await import("./worker/config.js");
-  const { initWorkerRoutes } = await import("./worker/routes.js");
+  const { parseBootConfig } = await import("./worker/config.js");
+  const { createDormantState } = await import("./worker/activation.js");
+  const { initWorkerState } = await import("./worker/routes.js");
   const { workerApp } = await import("./worker/server.js");
   const { serve } = await import("@hono/node-server");
 
-  let config;
+  let bootConfig;
   try {
-    config = parseWorkerConfig();
+    bootConfig = parseBootConfig();
   } catch (err) {
     console.error(`Fatal: ${(err as Error).message}`);
     process.exit(1);
   }
 
-  initWorkerRoutes(config);
-  logInfo("worker config parsed", {
-    instanceName: config.instanceName,
-    model: config.model,
-  });
+  const workerState = createDormantState(bootConfig);
+  initWorkerState(workerState);
 
-  serve({ fetch: workerApp.fetch, port: config.port }, () => {
-    logInfo("worker started", {
-      instanceName: config.instanceName,
-      port: config.port,
-    });
-    console.log(
-      `Worker started on port ${config.port} for instance ${config.instanceName}`,
-    );
+  logInfo("worker booting dormant", { port: bootConfig.port });
+
+  serve({ fetch: workerApp.fetch, port: bootConfig.port }, () => {
+    logInfo("worker started (dormant)", { port: bootConfig.port });
+    console.log(`Worker started on port ${bootConfig.port} (dormant)`);
   });
 }

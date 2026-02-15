@@ -1,23 +1,25 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { workerApp } from "./server.js";
-import { initWorkerRoutes, getInvocationQueue, getHistoryStore } from "./routes.js";
-import { parseWorkerConfig, type WorkerConfig } from "./config.js";
+import { initWorkerState, getWorkerState } from "./routes.js";
+import { createDormantState, activate } from "./activation.js";
+import { parseBootConfig, type BootConfig } from "./config.js";
 import type { RunFn } from "./queue.js";
 
-function makeValidEnv(
-  overrides: Record<string, string> = {},
-): Record<string, string> {
+function makeBootConfig(overrides: Partial<BootConfig> = {}): BootConfig {
   return {
-    AAS_INSTANCE_NAME: "dev/A/michael",
-    AAS_SYSTEM_PROMPT: "You are a helpful assistant.",
-    ANTHROPIC_API_KEY: "sk-ant-test-key",
-    SENTRY_DSN: "https://test@sentry.io/123",
+    anthropicApiKey: "sk-ant-test-key",
+    sentryDsn: "https://test@sentry.io/123",
+    port: 8080,
     ...overrides,
   };
 }
 
-function makeConfig(overrides: Record<string, string> = {}): WorkerConfig {
-  return parseWorkerConfig(makeValidEnv(overrides));
+function makeActivationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    instanceName: "dev/A/michael",
+    systemPrompt: "You are a helpful assistant.",
+    ...overrides,
+  };
 }
 
 function tick(ms = 10): Promise<void> {
@@ -26,249 +28,339 @@ function tick(ms = 10): Promise<void> {
 
 function assertDefined<T>(value: T | null | undefined): T {
   expect(value).toBeDefined();
+  expect(value).not.toBeNull();
   return value as T;
 }
 
-describe("worker routes and config", () => {
-  beforeAll(() => {
-    initWorkerRoutes(makeConfig());
-  });
+describe("worker routes", () => {
+  // --- Dormant state tests ---
 
-  it("GET /health returns 200 with status ok and instanceName", async () => {
-    const res = await workerApp.request("/health");
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.status).toBe("ok");
-    expect(body.instanceName).toBe("dev/A/michael");
-  });
-
-  it("GET /history returns 200 with empty messages initially", async () => {
-    const store = getHistoryStore();
-    store?.clear();
-
-    const res = await workerApp.request("/history");
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.instanceName).toBe("dev/A/michael");
-    expect(body.messages).toEqual([]);
-  });
-
-  it("GET /history returns accumulated messages", async () => {
-    const store = assertDefined(getHistoryStore());
-    store.clear();
-    store.append({
-      role: "user",
-      content: "Hello",
-      timestamp: "2026-02-14T00:00:00.000Z",
-      invocationId: "inv-1",
-    });
-    store.append({
-      role: "assistant",
-      content: "Hi there!",
-      timestamp: "2026-02-14T00:00:01.000Z",
-      invocationId: "inv-1",
+  describe("dormant state", () => {
+    beforeEach(() => {
+      initWorkerState(createDormantState(makeBootConfig()));
     });
 
-    const res = await workerApp.request("/history");
-    expect(res.status).toBe(200);
+    it("GET /health returns 200 with status dormant", async () => {
+      const res = await workerApp.request("/health");
+      expect(res.status).toBe(200);
 
-    const body = await res.json();
-    expect(body.messages).toHaveLength(2);
-    expect(body.messages[0].role).toBe("user");
-    expect(body.messages[0].content).toBe("Hello");
-    expect(body.messages[1].role).toBe("assistant");
-    expect(body.messages[1].content).toBe("Hi there!");
-  });
+      const body = await res.json();
+      expect(body.status).toBe("dormant");
+      expect(typeof body.nodeVersion).toBe("string");
+      expect(typeof body.platform).toBe("string");
+      expect(typeof body.arch).toBe("string");
+    });
 
-  it("GET /status returns 200 with runtime status fields", async () => {
-    const res = await workerApp.request("/status");
-    expect(res.status).toBe(200);
+    it("GET /history returns 503 when dormant", async () => {
+      const res = await workerApp.request("/history");
+      expect(res.status).toBe(503);
 
-    const body = await res.json();
-    expect(body.instanceName).toBe("dev/A/michael");
-    expect(body.model).toBe("claude-haiku-4-5-20251001");
-    expect(body.sessionId).toBeNull();
-    expect(typeof body.uptime).toBe("number");
-    expect(body.uptime).toBeGreaterThanOrEqual(0);
-    expect(body.messageCount).toBe(0);
-    expect(body.totalCostUsd).toBe(0);
-    expect(body.queueDepth).toBe(0);
-    expect(body.activeInvocationId).toBeNull();
-    expect(typeof body.startedAt).toBe("string");
-  });
+      const body = await res.json();
+      expect(body.error).toBe("Worker is dormant");
+      expect(body.code).toBe("dormant");
+    });
 
-  it("POST /abort returns aborted false when no invocation active", async () => {
-    const res = await workerApp.request("/abort", { method: "POST" });
-    expect(res.status).toBe(200);
+    it("GET /status returns 503 when dormant", async () => {
+      const res = await workerApp.request("/status");
+      expect(res.status).toBe(503);
 
-    const body = await res.json();
-    expect(body.aborted).toBe(false);
-    expect(body.reason).toBe("no_active_invocation");
-  });
+      const body = await res.json();
+      expect(body.code).toBe("dormant");
+    });
 
-  it("POST /abort returns aborted true when invocation is active", async () => {
-    const queue = assertDefined(getInvocationQueue());
+    it("POST /abort returns 503 when dormant", async () => {
+      const res = await workerApp.request("/abort", { method: "POST" });
+      expect(res.status).toBe(503);
+    });
 
-    // Set up a runner that blocks until aborted
-    const neverFinish: RunFn = async function* (_msg, _id, signal) {
-      await new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => resolve(), { once: true });
+    it("POST /reset returns 503 when dormant", async () => {
+      const res = await workerApp.request("/reset", { method: "POST" });
+      expect(res.status).toBe(503);
+    });
+
+    it("POST /message returns 503 when dormant", async () => {
+      const res = await workerApp.request("/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "hello" }),
       });
-    };
-    queue.setRunner(neverFinish);
-
-    // Enqueue an item to make it active
-    queue.enqueue({
-      invocationId: "abort-test-inv",
-      message: "test",
-      onEvent: () => {},
-      signal: new AbortController().signal,
+      expect(res.status).toBe(503);
     });
-    await tick();
-
-    const res = await workerApp.request("/abort", { method: "POST" });
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.aborted).toBe(true);
-    expect(body.invocationId).toBe("abort-test-inv");
-
-    await tick(50); // let the queue drain
   });
 
-  it("POST /reset clears history, queue, and session", async () => {
-    const store = assertDefined(getHistoryStore());
-    store.append({
-      role: "user",
-      content: "will be cleared",
-      timestamp: new Date().toISOString(),
-      invocationId: "inv-reset",
+  // --- POST /activate tests ---
+
+  describe("POST /activate", () => {
+    beforeEach(() => {
+      initWorkerState(createDormantState(makeBootConfig()));
     });
 
-    const res = await workerApp.request("/reset", { method: "POST" });
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.reset).toBe(true);
-    expect(body.instanceName).toBe("dev/A/michael");
-
-    expect(store.count).toBe(0);
-  });
-
-  it("POST /reset returns 409 when invocation is running", async () => {
-    const queue = assertDefined(getInvocationQueue());
-
-    const neverFinish: RunFn = async function* (_msg, _id, signal) {
-      await new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => resolve(), { once: true });
+    it("activates a dormant worker", async () => {
+      const res = await workerApp.request("/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(makeActivationBody()),
       });
-    };
-    queue.setRunner(neverFinish);
+      expect(res.status).toBe(200);
 
-    queue.enqueue({
-      invocationId: "active-inv",
-      message: "test",
-      onEvent: () => {},
-      signal: new AbortController().signal,
+      const body = await res.json();
+      expect(body.activated).toBe(true);
+      expect(body.instanceName).toBe("dev/A/michael");
+
+      const state = getWorkerState();
+      expect(state.status).toBe("active");
     });
-    await tick();
 
-    const res = await workerApp.request("/reset", { method: "POST" });
-    expect(res.status).toBe(409);
+    it("returns 409 if already active", async () => {
+      // Activate first
+      await workerApp.request("/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(makeActivationBody()),
+      });
 
-    const body = await res.json();
-    expect(body.error).toBe("Cannot reset while invocation is running");
-    expect(body.code).toBe("invocation_active");
+      // Try again
+      const res = await workerApp.request("/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(makeActivationBody()),
+      });
+      expect(res.status).toBe(409);
 
-    // Clean up: abort the active invocation
-    queue.abort();
-    await tick(50);
-  });
-
-  it("parseWorkerConfig succeeds with valid required-only env", () => {
-    const config = makeConfig();
-    expect(config.instanceName).toBe("dev/A/michael");
-    expect(config.systemPrompt).toBe("You are a helpful assistant.");
-    expect(config.anthropicApiKey).toBe("sk-ant-test-key");
-    expect(config.sentryDsn).toBe("https://test@sentry.io/123");
-  });
-
-  it("parseWorkerConfig applies defaults for optional vars", () => {
-    const config = makeConfig();
-    expect(config.mcpServers).toEqual([]);
-    expect(config.model).toBe("claude-haiku-4-5-20251001");
-    expect(config.maxTurns).toBe(50);
-    expect(config.maxBudgetUsd).toBe(1.0);
-    expect(config.port).toBe(8080);
-  });
-
-  it("parseWorkerConfig uses provided optional values", () => {
-    const config = makeConfig({
-      AAS_MODEL: "claude-sonnet-4-20250514",
-      AAS_MAX_TURNS: "100",
-      AAS_MAX_BUDGET_USD: "5.0",
-      PORT: "3000",
+      const body = await res.json();
+      expect(body.code).toBe("already_active");
     });
-    expect(config.model).toBe("claude-sonnet-4-20250514");
-    expect(config.maxTurns).toBe(100);
-    expect(config.maxBudgetUsd).toBe(5.0);
-    expect(config.port).toBe(3000);
-  });
 
-  it("parseWorkerConfig parses valid AAS_MCP_SERVERS JSON", () => {
-    const servers = [
-      { name: "test-mcp", url: "https://mcp.example.com" },
-      {
-        name: "auth-mcp",
-        url: "https://auth.example.com",
-        headers: { Authorization: "Bearer token" },
-      },
-    ];
-    const config = makeConfig({
-      AAS_MCP_SERVERS: JSON.stringify(servers),
+    it("returns 400 on invalid body", async () => {
+      const res = await workerApp.request("/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+
+      const body = await res.json();
+      expect(body.code).toBe("validation_error");
     });
-    expect(config.mcpServers).toHaveLength(2);
-    expect(config.mcpServers[0].name).toBe("test-mcp");
-    expect(config.mcpServers[1].headers).toEqual({
-      Authorization: "Bearer token",
+
+    it("returns 400 on non-JSON body", async () => {
+      const res = await workerApp.request("/activate", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
     });
   });
 
-  it("parseWorkerConfig throws on missing required AAS_INSTANCE_NAME", () => {
-    const env = makeValidEnv();
-    delete env["AAS_INSTANCE_NAME"];
-    expect(() => parseWorkerConfig(env)).toThrow("Worker config validation failed");
-    expect(() => parseWorkerConfig(env)).toThrow("instanceName");
+  // --- Active state tests ---
+
+  describe("active state", () => {
+    beforeEach(() => {
+      const state = createDormantState(makeBootConfig());
+      initWorkerState(state);
+      activate(state, makeActivationBody());
+    });
+
+    it("GET /health returns 200 with status ok and instanceName", async () => {
+      const res = await workerApp.request("/health");
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.status).toBe("ok");
+      expect(body.instanceName).toBe("dev/A/michael");
+      expect(typeof body.nodeVersion).toBe("string");
+    });
+
+    it("GET /history returns 200 with empty messages initially", async () => {
+      const state = getWorkerState();
+      state.historyStore?.clear();
+
+      const res = await workerApp.request("/history");
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.instanceName).toBe("dev/A/michael");
+      expect(body.messages).toEqual([]);
+    });
+
+    it("GET /history returns accumulated messages", async () => {
+      const state = getWorkerState();
+      const store = assertDefined(state.historyStore);
+      store.clear();
+      store.append({
+        role: "user",
+        content: "Hello",
+        timestamp: "2026-02-14T00:00:00.000Z",
+        invocationId: "inv-1",
+      });
+      store.append({
+        role: "assistant",
+        content: "Hi there!",
+        timestamp: "2026-02-14T00:00:01.000Z",
+        invocationId: "inv-1",
+      });
+
+      const res = await workerApp.request("/history");
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.messages).toHaveLength(2);
+      expect(body.messages[0].role).toBe("user");
+      expect(body.messages[0].content).toBe("Hello");
+      expect(body.messages[1].role).toBe("assistant");
+      expect(body.messages[1].content).toBe("Hi there!");
+    });
+
+    it("GET /status returns 200 with runtime status fields", async () => {
+      const res = await workerApp.request("/status");
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.instanceName).toBe("dev/A/michael");
+      expect(body.model).toBe("claude-haiku-4-5-20251001");
+      expect(body.sessionId).toBeNull();
+      expect(typeof body.uptime).toBe("number");
+      expect(body.uptime).toBeGreaterThanOrEqual(0);
+      expect(body.messageCount).toBe(0);
+      expect(body.totalCostUsd).toBe(0);
+      expect(body.queueDepth).toBe(0);
+      expect(body.activeInvocationId).toBeNull();
+      expect(typeof body.startedAt).toBe("string");
+    });
+
+    it("POST /abort returns aborted false when no invocation active", async () => {
+      const res = await workerApp.request("/abort", { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.aborted).toBe(false);
+      expect(body.reason).toBe("no_active_invocation");
+    });
+
+    it("POST /abort returns aborted true when invocation is active", async () => {
+      const state = getWorkerState();
+      const queue = assertDefined(state.invocationQueue);
+
+      // Set up a runner that blocks until aborted
+      const neverFinish: RunFn = async function* (_msg, _id, signal) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      };
+      queue.setRunner(neverFinish);
+
+      // Enqueue an item to make it active
+      queue.enqueue({
+        invocationId: "abort-test-inv",
+        message: "test",
+        onEvent: () => {},
+        signal: new AbortController().signal,
+      });
+      await tick();
+
+      const res = await workerApp.request("/abort", { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.aborted).toBe(true);
+      expect(body.invocationId).toBe("abort-test-inv");
+
+      await tick(50); // let the queue drain
+    });
+
+    it("POST /reset clears history, queue, and session", async () => {
+      const state = getWorkerState();
+      const store = assertDefined(state.historyStore);
+      store.append({
+        role: "user",
+        content: "will be cleared",
+        timestamp: new Date().toISOString(),
+        invocationId: "inv-reset",
+      });
+
+      const res = await workerApp.request("/reset", { method: "POST" });
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.reset).toBe(true);
+      expect(body.instanceName).toBe("dev/A/michael");
+
+      expect(store.count).toBe(0);
+    });
+
+    it("POST /reset returns 409 when invocation is running", async () => {
+      const state = getWorkerState();
+      const queue = assertDefined(state.invocationQueue);
+
+      const neverFinish: RunFn = async function* (_msg, _id, signal) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      };
+      queue.setRunner(neverFinish);
+
+      queue.enqueue({
+        invocationId: "active-inv",
+        message: "test",
+        onEvent: () => {},
+        signal: new AbortController().signal,
+      });
+      await tick();
+
+      const res = await workerApp.request("/reset", { method: "POST" });
+      expect(res.status).toBe(409);
+
+      const body = await res.json();
+      expect(body.error).toBe("Cannot reset while invocation is running");
+      expect(body.code).toBe("invocation_active");
+
+      // Clean up: abort the active invocation
+      queue.abort();
+      await tick(50);
+    });
   });
 
-  it("parseWorkerConfig throws on missing required AAS_SYSTEM_PROMPT", () => {
-    const env = makeValidEnv();
-    delete env["AAS_SYSTEM_PROMPT"];
-    expect(() => parseWorkerConfig(env)).toThrow("Worker config validation failed");
-    expect(() => parseWorkerConfig(env)).toThrow("systemPrompt");
-  });
+  // --- parseBootConfig tests ---
 
-  it("parseWorkerConfig throws on missing required ANTHROPIC_API_KEY", () => {
-    const env = makeValidEnv();
-    delete env["ANTHROPIC_API_KEY"];
-    expect(() => parseWorkerConfig(env)).toThrow("Worker config validation failed");
-    expect(() => parseWorkerConfig(env)).toThrow("anthropicApiKey");
-  });
+  describe("parseBootConfig", () => {
+    it("succeeds with valid required-only env", () => {
+      const config = parseBootConfig({
+        ANTHROPIC_API_KEY: "sk-ant-test-key",
+        SENTRY_DSN: "https://test@sentry.io/123",
+      });
+      expect(config.anthropicApiKey).toBe("sk-ant-test-key");
+      expect(config.sentryDsn).toBe("https://test@sentry.io/123");
+      expect(config.port).toBe(8080);
+    });
 
-  it("parseWorkerConfig throws on invalid JSON for AAS_MCP_SERVERS", () => {
-    expect(() =>
-      parseWorkerConfig(makeValidEnv({ AAS_MCP_SERVERS: "not-json" })),
-    ).toThrow("invalid JSON");
-  });
+    it("applies default port", () => {
+      const config = parseBootConfig({
+        ANTHROPIC_API_KEY: "sk-ant-test-key",
+        SENTRY_DSN: "https://test@sentry.io/123",
+      });
+      expect(config.port).toBe(8080);
+    });
 
-  it("parseWorkerConfig throws on invalid MCP server schema", () => {
-    const invalidServers = [{ name: "", url: "not-a-url" }];
-    expect(() =>
-      parseWorkerConfig(
-        makeValidEnv({ AAS_MCP_SERVERS: JSON.stringify(invalidServers) }),
-      ),
-    ).toThrow("Worker config validation failed");
+    it("uses provided PORT value", () => {
+      const config = parseBootConfig({
+        ANTHROPIC_API_KEY: "sk-ant-test-key",
+        SENTRY_DSN: "https://test@sentry.io/123",
+        PORT: "3000",
+      });
+      expect(config.port).toBe(3000);
+    });
+
+    it("throws on missing ANTHROPIC_API_KEY", () => {
+      expect(() =>
+        parseBootConfig({ SENTRY_DSN: "https://test@sentry.io/123" }),
+      ).toThrow("Worker boot config validation failed");
+    });
+
+    it("throws on missing SENTRY_DSN", () => {
+      expect(() =>
+        parseBootConfig({ ANTHROPIC_API_KEY: "sk-ant-test-key" }),
+      ).toThrow("Worker boot config validation failed");
+    });
   });
 });
