@@ -99,7 +99,7 @@ describe("RailwayClient", () => {
     expect(result).toEqual({ serviceId: "svc-abc" });
   });
 
-  it("serviceCreate sends correct GraphQL payload", async () => {
+  it("serviceCreate sends correct GraphQL payload with repo source by default", async () => {
     mockFetchSuccess({ serviceCreate: { id: "svc-abc" } });
     const client = makeClient();
 
@@ -114,6 +114,39 @@ describe("RailwayClient", () => {
     expect(body.variables.input.name).toBe("my-service");
     expect(body.variables.input.projectId).toBe("proj-123");
     expect(body.variables.input.source).toEqual({ repo: null });
+  });
+
+  it("serviceCreate sends image source when provided", async () => {
+    mockFetchSuccess({ serviceCreate: { id: "svc-img" } });
+    const client = makeClient();
+
+    await client.serviceCreate("my-image-service", { image: "ghcr.io/org/worker:latest" });
+
+    const fetchCall = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(fetchCall[1]?.body as string) as {
+      query: string;
+      variables: { input: { name: string; projectId: string; source: { image: string } } };
+    };
+    expect(body.variables.input.source).toEqual({ image: "ghcr.io/org/worker:latest" });
+  });
+
+  it("serviceCreate with image source returns serviceId", async () => {
+    mockFetchSuccess({ serviceCreate: { id: "svc-img" } });
+    const client = makeClient();
+
+    const result = await client.serviceCreate("my-image-service", { image: "ghcr.io/org/worker:latest" });
+
+    expect(result).toEqual({ serviceId: "svc-img" });
+  });
+
+  it("serviceCreate with image source sets span attributes", async () => {
+    mockFetchSuccess({ serviceCreate: { id: "svc-img" } });
+    const client = makeClient();
+
+    await client.serviceCreate("my-image-service", { image: "ghcr.io/org/worker:latest" });
+
+    expect(mockSetAttribute).toHaveBeenCalledWith("railway.source.image", "ghcr.io/org/worker:latest");
+    expect(mockSetAttribute).toHaveBeenCalledWith("railway.service.id", "svc-img");
   });
 
   it("serviceCreate sets span attributes", async () => {
@@ -250,6 +283,72 @@ describe("RailwayClient", () => {
       "railway.domain",
       "my-svc.up.railway.app",
     );
+  });
+
+  // --- serviceList ---
+
+  it("serviceList returns mapped services", async () => {
+    mockFetchSuccess({
+      project: {
+        services: {
+          edges: [
+            { node: { id: "svc-1", name: "aas-w-1" } },
+            { node: { id: "svc-2", name: "aas-w-2" } },
+          ],
+        },
+      },
+    });
+    const client = makeClient();
+
+    const result = await client.serviceList();
+
+    expect(result).toEqual([
+      { id: "svc-1", name: "aas-w-1" },
+      { id: "svc-2", name: "aas-w-2" },
+    ]);
+  });
+
+  it("serviceList returns empty array when no services", async () => {
+    mockFetchSuccess({
+      project: { services: { edges: [] } },
+    });
+    const client = makeClient();
+
+    const result = await client.serviceList();
+
+    expect(result).toEqual([]);
+  });
+
+  it("serviceList sends correct projectId variable", async () => {
+    mockFetchSuccess({
+      project: { services: { edges: [] } },
+    });
+    const client = makeClient();
+
+    await client.serviceList();
+
+    const fetchCall = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(fetchCall[1]?.body as string) as {
+      variables: { projectId: string };
+    };
+    expect(body.variables.projectId).toBe("proj-123");
+  });
+
+  it("serviceList sets services count on span", async () => {
+    mockFetchSuccess({
+      project: {
+        services: {
+          edges: [
+            { node: { id: "svc-1", name: "service-1" } },
+          ],
+        },
+      },
+    });
+    const client = makeClient();
+
+    await client.serviceList();
+
+    expect(mockSetAttribute).toHaveBeenCalledWith("railway.services.count", 1);
   });
 
   // --- Error handling ---
