@@ -5,7 +5,10 @@ import type {
   SDKUserMessage,
   SDKResultSuccess,
   SDKResultError,
+  SpawnOptions,
+  SpawnedProcess,
 } from "@anthropic-ai/claude-agent-sdk";
+import { spawn } from "child_process";
 import type { WorkerConfig } from "./config.js";
 import type { SseEvent } from "./queue.js";
 import {
@@ -117,11 +120,62 @@ export class SdkRunner {
       permissionMode: "bypassPermissions" as const,
       allowDangerouslySkipPermissions: true,
       abortController,
+      cwd: "/tmp",
       debug: true,
       stderr: (data: string) => {
         stderrChunks.push(data);
         logInfo("SDK stderr", { invocationId, data });
         console.log("[DEBUG sdk-runner] STDERR:", data);
+      },
+      spawnClaudeCodeProcess: (spawnOpts: SpawnOptions): SpawnedProcess => {
+        logInfo("SDK spawn", {
+          invocationId,
+          command: spawnOpts.command,
+          args: JSON.stringify(spawnOpts.args),
+          cwd: spawnOpts.cwd ?? "none",
+          envKeys: Object.keys(spawnOpts.env).join(","),
+        });
+        console.log("[DEBUG sdk-runner] SPAWN CMD:", spawnOpts.command);
+        console.log("[DEBUG sdk-runner] SPAWN ARGS:", JSON.stringify(spawnOpts.args));
+
+        const proc = spawn(spawnOpts.command, spawnOpts.args, {
+          cwd: spawnOpts.cwd,
+          stdio: ["pipe", "pipe", "pipe"],
+          signal: spawnOpts.signal,
+          env: spawnOpts.env as NodeJS.ProcessEnv,
+          windowsHide: true,
+        });
+
+        proc.stderr?.on("data", (chunk: Buffer) => {
+          const text = chunk.toString();
+          logInfo("SDK proc stderr", { invocationId, stderr: text.substring(0, 1000) });
+          stderrChunks.push(text);
+        });
+
+        proc.stdout?.on("data", (chunk: Buffer) => {
+          logInfo("SDK proc stdout", { invocationId, stdout: chunk.toString().substring(0, 500) });
+        });
+
+        proc.on("exit", (code, sig) => {
+          logInfo("SDK proc exit", { invocationId, code: code ?? -1, signal: sig ?? "none" });
+          console.log("[DEBUG sdk-runner] PROC EXIT:", { code, signal: sig });
+        });
+
+        proc.on("error", (err) => {
+          logError("SDK proc error", { invocationId, error: err.message });
+          console.log("[DEBUG sdk-runner] PROC ERROR:", err.message);
+        });
+
+        return {
+          stdin: proc.stdin!,
+          stdout: proc.stdout!,
+          get killed() { return proc.killed; },
+          get exitCode() { return proc.exitCode; },
+          kill: (sig: NodeJS.Signals) => proc.kill(sig),
+          on: proc.on.bind(proc) as SpawnedProcess["on"],
+          once: proc.once.bind(proc) as SpawnedProcess["once"],
+          off: proc.off.bind(proc) as SpawnedProcess["off"],
+        };
       },
     };
 
