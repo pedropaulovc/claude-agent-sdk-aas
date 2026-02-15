@@ -23,32 +23,56 @@ if (role === "control-plane") {
     console.log(`Control plane started on port ${PORT}`);
   });
 } else {
-  const { parseWorkerConfig } = await import("./worker/config.js");
-  const { initWorkerRoutes } = await import("./worker/routes.js");
+  const { parseWorkerConfig, parseMinimalWorkerConfig } = await import("./worker/config.js");
+  const { initWorkerRoutes, initWorkerPoolMode } = await import("./worker/routes.js");
   const { workerApp } = await import("./worker/server.js");
   const { serve } = await import("@hono/node-server");
 
-  let config;
-  try {
-    config = parseWorkerConfig();
-  } catch (err) {
-    console.error(`Fatal: ${(err as Error).message}`);
-    process.exit(1);
-  }
+  const hasInstanceName = Boolean(process.env["AAS_INSTANCE_NAME"]);
 
-  initWorkerRoutes(config);
-  logInfo("worker config parsed", {
-    instanceName: config.instanceName,
-    model: config.model,
-  });
+  if (hasInstanceName) {
+    // Standalone / M4 compat mode
+    let config;
+    try {
+      config = parseWorkerConfig();
+    } catch (err) {
+      console.error(`Fatal: ${(err as Error).message}`);
+      process.exit(1);
+    }
 
-  serve({ fetch: workerApp.fetch, port: config.port }, () => {
-    logInfo("worker started", {
+    initWorkerRoutes(config);
+    logInfo("worker config parsed", {
       instanceName: config.instanceName,
-      port: config.port,
+      model: config.model,
     });
-    console.log(
-      `Worker started on port ${config.port} for instance ${config.instanceName}`,
-    );
-  });
+
+    serve({ fetch: workerApp.fetch, port: config.port }, () => {
+      logInfo("worker started", {
+        instanceName: config.instanceName,
+        port: config.port,
+      });
+      console.log(
+        `Worker started on port ${config.port} for instance ${config.instanceName}`,
+      );
+    });
+  } else {
+    // Pool mode — start idle, await POST /configure
+    let minimalConfig;
+    try {
+      minimalConfig = parseMinimalWorkerConfig();
+    } catch (err) {
+      console.error(`Fatal: ${(err as Error).message}`);
+      process.exit(1);
+    }
+
+    initWorkerPoolMode(minimalConfig);
+    logInfo("worker started in pool mode (idle)", { port: minimalConfig.port });
+
+    serve({ fetch: workerApp.fetch, port: minimalConfig.port }, () => {
+      logInfo("worker listening", { port: minimalConfig.port, mode: "pool" });
+      console.log(
+        `Worker started on port ${minimalConfig.port} in pool mode (idle)`,
+      );
+    });
+  }
 }

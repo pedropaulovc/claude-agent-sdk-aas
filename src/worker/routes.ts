@@ -1,19 +1,34 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
+import * as Sentry from "@sentry/node";
 import { jsonResponse } from "../telemetry/middleware.js";
-import { logInfo, countMetric } from "../telemetry/helpers.js";
-import type { WorkerConfig } from "./config.js";
+import {
+  withSpan,
+  logInfo,
+  countMetric,
+  chunkedLog,
+} from "../telemetry/helpers.js";
+import type { WorkerConfig, MinimalWorkerConfig, WorkerState } from "./config.js";
+import { configurePayloadSchema } from "./config.js";
 import { InvocationQueue, QueueFullError } from "./queue.js";
 import type { SseEvent } from "./queue.js";
 import { SdkRunner } from "./sdk-runner.js";
 import { HistoryStore, type HistoryMessage } from "./history.js";
 
-let workerConfig: WorkerConfig | null = null;
+// Mutable worker state
+let workerState: WorkerState = "idle";
+let instanceName: string | null = null;
+let anthropicApiKey: string | null = null;
+let sentryDsn = "";
 let invocationQueue: InvocationQueue | null = null;
 let sdkRunner: SdkRunner | null = null;
 let historyStore: HistoryStore | null = null;
 let startedAt: string | null = null;
+let configuredAt: string | null = null;
+
+// Current dynamic config (stored for /status)
+let currentModel: string | null = null;
 
 const messageSchema = z.object({
   message: z.string().min(1, "message must be a non-empty string"),
@@ -23,8 +38,15 @@ const messageSchema = z.object({
   }).optional(),
 });
 
+/**
+ * Initialize worker in standalone (M4 compat) mode.
+ * Worker starts immediately in 'active' state.
+ */
 export function initWorkerRoutes(config: WorkerConfig): void {
-  workerConfig = config;
+  anthropicApiKey = config.anthropicApiKey;
+  instanceName = config.instanceName;
+  currentModel = config.model;
+
   const runner = new SdkRunner(config);
   sdkRunner = runner;
   invocationQueue = new InvocationQueue(25);
@@ -33,6 +55,32 @@ export function initWorkerRoutes(config: WorkerConfig): void {
   );
   historyStore = new HistoryStore();
   startedAt = new Date().toISOString();
+  workerState = "active";
+}
+
+/**
+ * Initialize worker in pool mode.
+ * Worker starts in 'idle' state and waits for POST /configure.
+ */
+export function initWorkerPoolMode(minimalConfig: MinimalWorkerConfig): void {
+  anthropicApiKey = minimalConfig.anthropicApiKey;
+  sentryDsn = minimalConfig.sentryDsn;
+  workerState = "idle";
+  instanceName = null;
+  sdkRunner = null;
+  invocationQueue = null;
+  historyStore = null;
+  startedAt = new Date().toISOString();
+  configuredAt = null;
+  currentModel = null;
+}
+
+export function getWorkerState(): WorkerState {
+  return workerState;
+}
+
+export function getInstanceName(): string | null {
+  return instanceName;
 }
 
 export function getInvocationQueue(): InvocationQueue | null {
@@ -102,44 +150,51 @@ export const workerRoutes = new Hono();
 workerRoutes.get("/health", (c) => {
   return jsonResponse(c, {
     status: "ok" as const,
-    instanceName: workerConfig?.instanceName ?? "unknown",
+    instanceName: instanceName ?? null,
+    state: workerState,
   });
 });
 
 workerRoutes.get("/history", (c) => {
-  if (!workerConfig || !historyStore) {
+  if (workerState !== "active") {
+    return jsonResponse(c, { error: "Worker is idle", state: workerState }, 503);
+  }
+
+  if (!historyStore) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
   return jsonResponse(c, {
-    instanceName: workerConfig.instanceName,
+    instanceName,
     messages: historyStore.getAll(),
   });
 });
 
 workerRoutes.get("/status", (c) => {
-  if (!workerConfig || !sdkRunner || !invocationQueue) {
-    return jsonResponse(c, { error: "Worker not initialized" }, 500);
-  }
-
   const uptime = startedAt
     ? Date.now() - new Date(startedAt).getTime()
     : 0;
 
   return jsonResponse(c, {
-    instanceName: workerConfig.instanceName,
-    model: workerConfig.model,
-    sessionId: sdkRunner.sessionId,
+    instanceName,
+    state: workerState,
+    model: currentModel,
+    sessionId: sdkRunner?.sessionId ?? null,
     uptime,
-    messageCount: sdkRunner.messageCount,
-    totalCostUsd: sdkRunner.totalCostUsd,
-    queueDepth: invocationQueue.depth,
-    activeInvocationId: invocationQueue.activeInvocationId,
+    messageCount: sdkRunner?.messageCount ?? 0,
+    totalCostUsd: sdkRunner?.totalCostUsd ?? 0,
+    queueDepth: invocationQueue?.depth ?? 0,
+    activeInvocationId: invocationQueue?.activeInvocationId ?? null,
     startedAt: startedAt ?? new Date().toISOString(),
+    configuredAt,
   });
 });
 
 workerRoutes.post("/abort", (c) => {
+  if (workerState !== "active") {
+    return jsonResponse(c, { error: "Worker is idle", state: workerState }, 503);
+  }
+
   if (!invocationQueue) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
@@ -152,36 +207,158 @@ workerRoutes.post("/abort", (c) => {
   return jsonResponse(c, { aborted: true, invocationId: result.invocationId });
 });
 
-workerRoutes.post("/reset", (c) => {
-  if (!workerConfig || !invocationQueue || !sdkRunner || !historyStore) {
-    return jsonResponse(c, { error: "Worker not initialized" }, 500);
+workerRoutes.post("/configure", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body) {
+    return jsonResponse(c, { error: "Invalid JSON body" }, 400);
   }
 
-  if (invocationQueue.activeInvocationId) {
+  const parsed = configurePayloadSchema.safeParse(body);
+  if (!parsed.success) {
+    const messages = parsed.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    return jsonResponse(c, { error: messages }, 400);
+  }
+
+  if (workerState === "configuring" || workerState === "resetting") {
     return jsonResponse(
       c,
-      { error: "Cannot reset while invocation is running", code: "invocation_active" },
+      { error: `Cannot configure while worker is ${workerState}`, code: "invalid_state" },
       409,
     );
   }
 
-  invocationQueue.clear();
-  sdkRunner.resetSession();
-  historyStore.clear();
+  return withSpan("worker.configure", "worker.configure", async () => {
+    const payload = parsed.data;
 
-  logInfo("Worker reset", { instanceName: workerConfig.instanceName });
-  countMetric("worker.reset", 1, { instanceName: workerConfig.instanceName });
+    // Implicit reset if currently active
+    if (workerState === "active" && invocationQueue && sdkRunner && historyStore) {
+      if (invocationQueue.activeInvocationId) {
+        return jsonResponse(c, { error: "Cannot reconfigure while invocation is active", state: workerState }, 409);
+      }
+      invocationQueue.clear();
+      sdkRunner.resetSession();
+      historyStore.clear();
+    }
 
-  return jsonResponse(c, { reset: true, instanceName: workerConfig.instanceName });
+    workerState = "configuring";
+
+    if (!anthropicApiKey) {
+      workerState = "idle";
+      return jsonResponse(c, { error: "No API key configured" }, 500);
+    }
+
+    // Build a WorkerConfig from the payload + stored API key
+    const runnerConfig: WorkerConfig = {
+      instanceName: payload.instanceName,
+      systemPrompt: payload.systemPrompt,
+      mcpServers: payload.mcpServers,
+      model: payload.model,
+      maxTurns: payload.maxTurns,
+      maxBudgetUsd: payload.maxBudgetUsd,
+      anthropicApiKey,
+      sentryDsn,
+      port: 0,       // Not needed by SdkRunner
+    };
+
+    const runner = new SdkRunner(runnerConfig);
+    sdkRunner = runner;
+
+    const queue = new InvocationQueue(25);
+    queue.setRunner((message, invocationId, signal) =>
+      runner.run(message, invocationId, signal),
+    );
+    invocationQueue = queue;
+
+    historyStore = new HistoryStore();
+    instanceName = payload.instanceName;
+    currentModel = payload.model;
+    configuredAt = new Date().toISOString();
+    workerState = "active";
+
+    Sentry.getCurrentScope().setTag("service.name", `aas-worker-${payload.instanceName}`);
+
+    chunkedLog(
+      `${payload.instanceName} | configure.prompt`,
+      payload.systemPrompt,
+    );
+    logInfo(`${payload.instanceName} | configure`, {
+      "prompt.len": payload.systemPrompt.length,
+      mcpServers: payload.mcpServers.length,
+      model: payload.model,
+    });
+    countMetric("worker.configured", 1, { instanceName: payload.instanceName });
+
+    return jsonResponse(c, {
+      configured: true,
+      instanceName: payload.instanceName,
+      state: "active" as const,
+    });
+  });
+});
+
+workerRoutes.post("/reset", async (c) => {
+  if (workerState === "idle") {
+    return jsonResponse(c, { reset: true, instanceName: null, state: "idle" as const });
+  }
+
+  if (workerState === "configuring" || workerState === "resetting") {
+    return jsonResponse(
+      c,
+      { error: `Cannot reset while worker is ${workerState}`, code: "invalid_state" },
+      409,
+    );
+  }
+
+  if (invocationQueue?.activeInvocationId) {
+    return jsonResponse(
+      c,
+      { error: "Cannot reset while invocation is active", code: "invocation_active" },
+      409,
+    );
+  }
+
+  return withSpan("worker.reset", "worker.reset", async () => {
+    const previousName = instanceName;
+    workerState = "resetting";
+
+    invocationQueue?.clear();
+    sdkRunner?.resetSession();
+    historyStore?.clear();
+
+    sdkRunner = null;
+    invocationQueue = null;
+    historyStore = null;
+    instanceName = null;
+    currentModel = null;
+    configuredAt = null;
+    workerState = "idle";
+
+    Sentry.getCurrentScope().setTag("service.name", "aas-worker-idle");
+
+    logInfo(`${previousName} | reset | returning to idle`);
+    countMetric("worker.reset", 1, { instanceName: previousName ?? "unknown" });
+
+    return jsonResponse(c, {
+      reset: true,
+      instanceName: previousName,
+      state: "idle" as const,
+    });
+  });
 });
 
 workerRoutes.post("/message", async (c) => {
-  if (!workerConfig || !invocationQueue || !historyStore) {
+  if (workerState !== "active") {
+    return jsonResponse(c, { error: "Worker is idle", state: workerState }, 503);
+  }
+
+  if (!invocationQueue || !historyStore) {
     return jsonResponse(c, { error: "Worker not initialized" }, 500);
   }
 
   const currentQueue = invocationQueue;
-  const currentConfig = workerConfig;
+  const currentInstanceName = instanceName;
   const currentHistory = historyStore;
 
   const body = await c.req.json().catch(() => null);
@@ -201,10 +378,10 @@ workerRoutes.post("/message", async (c) => {
 
   logInfo("Message received", {
     invocationId,
-    instanceName: currentConfig.instanceName,
+    instanceName: currentInstanceName,
     messageLength: parsed.data.message.length,
   });
-  countMetric("message.received", 1, { instanceName: currentConfig.instanceName });
+  countMetric("message.received", 1, { instanceName: currentInstanceName ?? "unknown" });
 
   return streamSSE(c, async (stream) => {
     const abortController = new AbortController();
